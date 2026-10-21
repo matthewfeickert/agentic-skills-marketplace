@@ -25,9 +25,10 @@ import io
 import re
 import sys
 import tarfile
-import urllib.request
 
 import yaml
+
+from download import fetch
 
 # Packages that ship with R itself; never separate conda-forge packages.
 BASE_R = {
@@ -130,8 +131,7 @@ def main():
     data, errors = None, []
     for url in urls:
         try:
-            with urllib.request.urlopen(url) as r:
-                data = r.read()
+            data = fetch(url)
             print(f"source: {url}")
             break
         except Exception as e:  # try the next mirror / Archive URL

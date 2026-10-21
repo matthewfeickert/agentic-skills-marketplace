@@ -16,13 +16,14 @@ import re
 import sys
 import tarfile
 import tomllib
-import urllib.request
 
 import yaml
 from packaging.requirements import Requirement
 from packaging.specifiers import Specifier, SpecifierSet
 from packaging.version import Version
 from packaging.utils import canonicalize_name
+
+from download import fetch
 
 # PyPI name -> conda-forge name, where they differ by convention.
 # Extend as needed; unknown differences are reported for manual review.
@@ -113,8 +114,7 @@ def main():
     name = args.pypi_name or render(recipe["package"]["name"], context)
     version = render(str(context.get("version", recipe["package"]["version"])), context)
 
-    with urllib.request.urlopen(f"https://pypi.org/pypi/{name}/{version}/json") as r:
-        urls = json.load(r)["urls"]
+    urls = json.loads(fetch(f"https://pypi.org/pypi/{name}/{version}/json"))["urls"]
     sdist = next(u for u in urls if u["packagetype"] == "sdist")
     print(f"sdist: {sdist['filename']} sha256={sdist['digests']['sha256']}")
     recipe_sha = render(str(recipe["source"].get("sha256", "")), context)
@@ -131,8 +131,7 @@ def main():
         print("MISMATCH: source.url is a hash-based files.pythonhosted.org path; "
               f"use https://pypi.org/packages/source/{name[0]}/{name}/<sdist-filename with ${{{{ version }}}}>")
 
-    with urllib.request.urlopen(sdist["url"]) as r:
-        tar = tarfile.open(fileobj=io.BytesIO(r.read()))
+    tar = tarfile.open(fileobj=io.BytesIO(fetch(sdist["url"])))
     top_level = {m.name.split("/", 1)[1]: m for m in tar.getmembers() if m.name.count("/") == 1}
     lines = tar.extractfile(top_level["PKG-INFO"]).read().decode().splitlines()
 
