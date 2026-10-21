@@ -6,7 +6,8 @@ Usage (from the feedstock root):
 Downloads the sdist for the recipe's version from PyPI, reads Requires-Dist and
 Requires-Python from its PKG-INFO and [build-system].requires from its
 pyproject.toml, and reports any differences from requirements.run and
-requirements.host. Exits 1 on any mismatch.
+requirements.host. Exits 0 on a match, 1 on any mismatch, and 2 if the
+script fails to run.
 """
 
 import argparse
@@ -16,6 +17,7 @@ import re
 import sys
 import tarfile
 import tomllib
+import traceback
 
 import yaml
 from packaging.requirements import Requirement
@@ -231,4 +233,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        # Exit 2, not 1, so a script that could not run (download failure,
+        # unsupported recipe layout, ...) is never read as a requirements mismatch.
+        traceback.print_exc()
+        print("RESULT: ERROR (the script failed; this is not a requirements mismatch)")
+        sys.exit(2)

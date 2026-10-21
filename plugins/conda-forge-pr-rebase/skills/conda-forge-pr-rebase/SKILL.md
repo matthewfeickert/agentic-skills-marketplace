@@ -103,6 +103,12 @@ If the PR's CI failed with a `503 Service Unavailable` while downloading the sou
 
 Pick the script by package type. R packages (`r-*` feedstocks, built with `R CMD INSTALL`) use `compare_r_requirements.py`; see [R packages](#r-packages) below. Everything else, i.e. Python packages from PyPI, uses `compare_requirements.py`.
 
+Both scripts end with a `RESULT:` line and an exit code:
+
+- `RESULT: MATCH`, exit 0: the recipe matches the metadata.
+- `RESULT: MISMATCH`, exit 1: the recipe differs from the metadata; the lines above it say how.
+- `RESULT: ERROR`, exit 2: the script itself failed, e.g. a download kept failing after retries or the recipe has a layout the script doesn't support (such as a multi-output recipe). This says nothing about the recipe, so never change requirements because of it. Read the traceback, and fix the invocation if that was the cause (e.g. pass `--pypi-name`). Otherwise compare the requirements by hand and tell the user that the script could not run and why.
+
 ### Python packages
 
 Run the bundled script from the feedstock root:
@@ -117,7 +123,7 @@ It downloads the sdist for the recipe's version and checks that `source.sha256` 
 - **Host requirements:** `[build-system].requires` from the sdist's `pyproject.toml` against `requirements.host`. Only a build requirement missing from host is a mismatch. A renamed or replaced build tool shows up here, e.g. upstream `versioneer` vs. recipe `versioneer-518`. **Don't add version bounds to host requirements**, because conda-forge avoids them. Upstream build-tool bounds that the host entries lack (e.g. `setuptools>=61.0`, `hatchling>=1.27,<1.32`) are printed as `info` only, so leave them out. `wheel` is ignored, and host-only entries such as `pip` are informational.
 - **Implied dependencies:** conda-forge's `jax` always controls `jaxlib`, so **never add `jaxlib`** to a recipe, even when upstream metadata lists it. The script leaves a sdist `jaxlib` out of the comparison and prints an `info` line. If upstream raises the `jaxlib` floor, raise the `jax` floor instead if it doesn't already cover it. An existing `jaxlib` entry in a recipe is also reported as redundant `info`; leave it unless asked. To add more pairs like this, extend `IMPLIED_BY` in the script.
 
-It maps common PyPI→conda names (`matplotlib`→`matplotlib-base`), normalizes `_`/`-`, and exits non-zero on any mismatch. Pass `--pypi-name` if the PyPI name differs from `package.name`.
+It maps common PyPI→conda names (`matplotlib`→`matplotlib-base`), normalizes `_`/`-`, and exits 1 on any mismatch. Pass `--pypi-name` if the PyPI name differs from `package.name`.
 
 For anything it reports under `REVIEW`, decide by hand:
 - Dependencies conditional on environment markers: e.g. `tomli; python_version < '3.11'` should be dropped when `python_min` is at least 3.11.
