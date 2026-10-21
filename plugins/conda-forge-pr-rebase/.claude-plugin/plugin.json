@@ -1,7 +1,7 @@
 {
   "name": "conda-forge-pr-rebase",
   "description": "Rebase an open conda-forge feedstock PR onto upstream main, validate its run and host requirements against the package metadata, regenerate with conda-smithy, and force-push to the PR branch.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": {
     "name": "Matthew Feickert",
     "url": "https://github.com/matthewfeickert"
