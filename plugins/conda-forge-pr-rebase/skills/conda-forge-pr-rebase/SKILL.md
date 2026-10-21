@@ -21,7 +21,7 @@ Rebase the conda-forge feedstock PR given in `$ARGUMENTS` onto upstream `main`, 
 gh pr view <N> -R conda-forge/<feedstock> --json headRefName,headRefOid,headRepositoryOwner,maintainerCanModify,state,title
 ```
 
-Record `headRefOid` (the old head, needed for the lease when pushing), the head owner, and the branch. `maintainerCanModify` must be true for bot PRs, or the push will be refused.
+Record `headRefOid` (the old head, needed for the lease when pushing), the head owner, and the branch. The [preflight checks](#preflight-checks) below use `state`, the head owner, and `maintainerCanModify`.
 
 ```bash
 gh repo clone conda-forge/<feedstock> -- -q    # or reuse an existing clone and `git fetch origin main`
@@ -34,6 +34,24 @@ git log --format='%h %an: %s' origin/main..pr<N>
 Always re-fetch `main` right before rebasing; earlier PRs in a series may have just been merged. If the upstream remote is named `upstream` (a clone of a personal fork), use `upstream/main` in place of `origin/main` throughout.
 
 Also look at the repository's commit history (`git log --format='%h %an: %s' origin/main | grep -v -e regro -e 'conda-forge administrator' -e 'conda-forge-webservices'`) to learn the human commit message style. On the user's feedstocks it is `MNT: <Imperative description>`, and requirement updates are `MNT: Update to v<version> requirements`.
+
+### Preflight checks
+
+Run these after fetching `main` and before changing anything. If any of them fails, stop: don't rebase or push. Tell the user which check failed and what you found, and leave any action on the PR itself (e.g. closing a superseded PR) to them.
+
+1. **Tools:** `command -v git gh pixi curl conda-smithy` prints all five paths, and `gh auth status` shows a logged-in account.
+2. **The PR is open:** `state` is `OPEN`.
+3. **The branch can be pushed:** the head owner is not `conda-forge` (the scope rules forbid pushing to `conda-forge/<feedstock>`). Unless the head repository belongs to the user (`gh api user -q .login`), `maintainerCanModify` must be `true`, or GitHub refuses the push.
+4. **The version is not a downgrade.** Compare the version on `main` with the PR's:
+
+   ```bash
+   git show origin/main:recipe/recipe.yaml | grep -m1 -E '^\s+version:'      # main
+   git show bot/<head-branch>:recipe/recipe.yaml | grep -m1 -E '^\s+version:'  # PR
+   ```
+
+   For a v0 `meta.yaml`, grep for `set version` instead. For a version-bump PR, the PR's version must be newer than `main`'s. If `main` already has the same or a newer version, the PR is superseded, and resolving the rebase conflict would downgrade the recipe. For a rebuild or migration PR (same version, higher build number; see [Rebuild PRs](#rebuild-prs-keep-the-build-number-above-mains)), the versions must be equal.
+
+Also check whether the recipe is multi-output (a top-level `outputs:` key). That is not a reason to stop, but the step 3 scripts can't compare such a recipe and exit with code 2. Plan to compare each output's requirements by hand in step 3, and say so in the report.
 
 ## 2. Rebase
 
@@ -229,6 +247,8 @@ gh pr view <N> -R conda-forge/<feedstock> --json headRefOid,mergeable
 ```
 
 The new `headRefOid` may take a few seconds to update on GitHub, so re-query if it still shows the old one.
+
+If the push is rejected with `(stale info)`, someone pushed to the PR branch after step 1, and the lease kept their commits from being overwritten. Stop: don't retry with `--force` or with a lease on the new head. Show the user what was pushed (`git fetch bot <head-branch>`, then `git log --format='%h %an: %s' <old headRefOid>..bot/<head-branch>`) and let them decide how to continue.
 
 ## 7. Report
 
