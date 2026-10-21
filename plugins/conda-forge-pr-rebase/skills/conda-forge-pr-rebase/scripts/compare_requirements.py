@@ -18,6 +18,7 @@ import sys
 import tarfile
 import tomllib
 import traceback
+import urllib.error
 
 import yaml
 from packaging.requirements import Requirement
@@ -116,8 +117,19 @@ def main():
     name = args.pypi_name or render(recipe["package"]["name"], context)
     version = render(str(context.get("version", recipe["package"]["version"])), context)
 
-    urls = json.loads(fetch(f"https://pypi.org/pypi/{name}/{version}/json"))["urls"]
-    sdist = next(u for u in urls if u["packagetype"] == "sdist")
+    try:
+        urls = json.loads(fetch(f"https://pypi.org/pypi/{name}/{version}/json"))["urls"]
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            raise
+        raise RuntimeError(f"{name} {version} is not on PyPI; pass --pypi-name if the "
+                           "PyPI project name differs from the recipe's package name") from e
+    sdist = next((u for u in urls if u["packagetype"] == "sdist"), None)
+    if sdist is None:
+        # Requires-Dist and the build requirements are read from the sdist, so
+        # there is nothing to compare against (e.g. a wheel-only release).
+        raise RuntimeError(f"PyPI has no sdist for {name} {version} ({len(urls)} other files); "
+                           "compare the requirements by hand")
     print(f"sdist: {sdist['filename']} sha256={sdist['digests']['sha256']}")
     recipe_sha = render(str(recipe["source"].get("sha256", "")), context)
     sha_ok = recipe_sha == sdist["digests"]["sha256"]
