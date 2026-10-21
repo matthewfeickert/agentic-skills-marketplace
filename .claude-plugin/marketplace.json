@@ -1,0 +1,17 @@
+{
+  "name": "matthewfeickert-agentic-skills-marketplace",
+  "owner": {
+    "name": "Matthew Feickert",
+    "url": "https://github.com/matthewfeickert"
+  },
+  "metadata": {
+    "description": "Personal agentic skills for Claude Code."
+  },
+  "plugins": [
+    {
+      "name": "conda-forge-pr-rebase",
+      "source": "./plugins/conda-forge-pr-rebase",
+      "description": "Rebase an open conda-forge feedstock PR onto upstream main, validate its run and host requirements against the package metadata, regenerate with conda-smithy, and force-push to the PR branch."
+    }
+  ]
+}
