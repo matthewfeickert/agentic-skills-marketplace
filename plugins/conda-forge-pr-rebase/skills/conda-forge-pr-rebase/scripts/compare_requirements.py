@@ -6,7 +6,8 @@ Usage (from the feedstock root):
 Downloads the sdist for the recipe's version from PyPI, reads Requires-Dist and
 Requires-Python from its PKG-INFO and [build-system].requires from its
 pyproject.toml, and reports any differences from requirements.run and
-requirements.host. Exits 1 on any mismatch.
+requirements.host. Exits 0 on a match, 1 on any mismatch, and 2 if the
+script fails to run.
 """
 
 import argparse
@@ -16,13 +17,16 @@ import re
 import sys
 import tarfile
 import tomllib
-import urllib.request
+import traceback
+import urllib.error
 
 import yaml
 from packaging.requirements import Requirement
 from packaging.specifiers import Specifier, SpecifierSet
 from packaging.version import Version
 from packaging.utils import canonicalize_name
+
+from download import fetch
 
 # PyPI name -> conda-forge name, where they differ by convention.
 # Extend as needed; unknown differences are reported for manual review.
@@ -113,9 +117,19 @@ def main():
     name = args.pypi_name or render(recipe["package"]["name"], context)
     version = render(str(context.get("version", recipe["package"]["version"])), context)
 
-    with urllib.request.urlopen(f"https://pypi.org/pypi/{name}/{version}/json") as r:
-        urls = json.load(r)["urls"]
-    sdist = next(u for u in urls if u["packagetype"] == "sdist")
+    try:
+        urls = json.loads(fetch(f"https://pypi.org/pypi/{name}/{version}/json"))["urls"]
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            raise
+        raise RuntimeError(f"{name} {version} is not on PyPI; pass --pypi-name if the "
+                           "PyPI project name differs from the recipe's package name") from e
+    sdist = next((u for u in urls if u["packagetype"] == "sdist"), None)
+    if sdist is None:
+        # Requires-Dist and the build requirements are read from the sdist, so
+        # there is nothing to compare against (e.g. a wheel-only release).
+        raise RuntimeError(f"PyPI has no sdist for {name} {version} ({len(urls)} other files); "
+                           "compare the requirements by hand")
     print(f"sdist: {sdist['filename']} sha256={sdist['digests']['sha256']}")
     recipe_sha = render(str(recipe["source"].get("sha256", "")), context)
     sha_ok = recipe_sha == sdist["digests"]["sha256"]
@@ -131,8 +145,7 @@ def main():
         print("MISMATCH: source.url is a hash-based files.pythonhosted.org path; "
               f"use https://pypi.org/packages/source/{name[0]}/{name}/<sdist-filename with ${{{{ version }}}}>")
 
-    with urllib.request.urlopen(sdist["url"]) as r:
-        tar = tarfile.open(fileobj=io.BytesIO(r.read()))
+    tar = tarfile.open(fileobj=io.BytesIO(fetch(sdist["url"])))
     top_level = {m.name.split("/", 1)[1]: m for m in tar.getmembers() if m.name.count("/") == 1}
     lines = tar.extractfile(top_level["PKG-INFO"]).read().decode().splitlines()
 
@@ -232,4 +245,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        # Exit 2, not 1, so a script that could not run (download failure,
+        # unsupported recipe layout, ...) is never read as a requirements mismatch.
+        traceback.print_exc()
+        print("RESULT: ERROR (the script failed; this is not a requirements mismatch)")
+        sys.exit(2)

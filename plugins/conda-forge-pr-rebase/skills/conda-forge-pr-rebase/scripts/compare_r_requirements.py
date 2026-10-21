@@ -17,7 +17,7 @@ Following conda-forge R conventions:
   - Depends: R (>= x) <-> r-base >=x
 Base R packages (utils, tools, stats, ...) are not conda packages and are skipped.
 Only r-* entries of the recipe are compared; compilers, make, etc. are ignored.
-Exits 1 on any mismatch.
+Exits 0 on a match, 1 on any mismatch, and 2 if the script fails to run.
 """
 
 import hashlib
@@ -25,9 +25,11 @@ import io
 import re
 import sys
 import tarfile
-import urllib.request
+import traceback
 
 import yaml
+
+from download import fetch
 
 # Packages that ship with R itself; never separate conda-forge packages.
 BASE_R = {
@@ -130,14 +132,13 @@ def main():
     data, errors = None, []
     for url in urls:
         try:
-            with urllib.request.urlopen(url) as r:
-                data = r.read()
+            data = fetch(url)
             print(f"source: {url}")
             break
         except Exception as e:  # try the next mirror / Archive URL
             errors.append(f"{url}: {e}")
     if data is None:
-        sys.exit("could not download source:\n  " + "\n  ".join(errors))
+        raise RuntimeError("could not download source:\n  " + "\n  ".join(errors))
 
     recipe_sha = render(str(source.get("sha256", "")), context)
     sha_ok = hashlib.sha256(data).hexdigest() == recipe_sha
@@ -197,4 +198,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        # Exit 2, not 1, so a script that could not run (download failure,
+        # unsupported recipe layout, ...) is never read as a requirements mismatch.
+        traceback.print_exc()
+        print("RESULT: ERROR (the script failed; this is not a requirements mismatch)")
+        sys.exit(2)
