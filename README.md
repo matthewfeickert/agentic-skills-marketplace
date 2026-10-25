@@ -24,6 +24,29 @@ Use `--scope project` to install into the current repository instead, and `gh sk
 
 The skills reference their bundled scripts through `${CLAUDE_SKILL_DIR}`, which only Claude Code expands. With other `--agent` values, the agent must resolve the script paths relative to the skill's installed directory.
 
+## Updating
+
+### Claude Code plugin marketplace
+
+Refresh the marketplace so that Claude Code sees the latest plugin versions, then update the plugin:
+
+```bash
+claude plugin marketplace update matthewfeickert-agentic-skills-marketplace
+claude plugin update conda-forge-pr-rebase@matthewfeickert-agentic-skills-marketplace
+```
+
+Restart Claude Code to load the updated plugin. Inside a session, `/plugin marketplace update matthewfeickert-agentic-skills-marketplace` refreshes the marketplace, and the `/plugin` menu offers the update. Claude Code compares the `version` in the plugin's `plugin.json`, so a change only reaches existing installs once that version is bumped. Run `claude plugin list` to check which version is installed.
+
+### GitHub CLI
+
+Update the skill to the latest version in the repository:
+
+```bash
+gh skill update conda-forge-pr-rebase
+```
+
+`gh skill update` compares the installed skill's tree SHA with the repository, so it picks up every change, whether or not the plugin version was bumped. Add `--dry-run` to only report available updates. A skill installed with `--pin` is skipped until you pass `--unpin`.
+
 ## Plugins
 
 | Plugin | Description |
