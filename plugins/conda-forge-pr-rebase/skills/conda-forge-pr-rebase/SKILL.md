@@ -14,6 +14,7 @@ Rebase the conda-forge feedstock PR given in `$ARGUMENTS` onto upstream `main`, 
 - Only modify files under `recipe/`; everything else comes from regeneration.
 - Work in a clone under the session scratchpad directory, and report its absolute path at the end.
 - The clone's directory must be named exactly `<name>-feedstock` (the `gh repo clone` default). Never rename it (e.g. to `pr<N>`) and never use a `git worktree` with a different directory name. `conda-smithy` takes the feedstock name from the directory name and otherwise writes the wrong name into `pixi.toml` and `README.md`. To keep clones for several PRs apart, put each in its own parent directory (e.g. `<scratchpad>/pr<N>/<name>-feedstock`).
+- Always run `pixi exec` with `--force-reinstall`, as in the commands below. Without it, `pixi exec` reuses any cached environment with the same specs and never checks for newer packages, so an unpinned tool such as `rattler-build` stays at whatever version was first resolved. A local build would then no longer match the `rattler-build` that conda-forge CI uses. The flag re-resolves and relinks from the package cache, which takes about a second.
 
 ## 1. Inspect the PR and set up the clone
 
@@ -132,7 +133,7 @@ Both scripts end with a `RESULT:` line and an exit code:
 Run the bundled script from the feedstock root:
 
 ```bash
-pixi exec -s python -s pyyaml -s packaging -- python "${CLAUDE_SKILL_DIR}"/scripts/compare_requirements.py recipe/recipe.yaml
+pixi exec --force-reinstall -s python -s pyyaml -s packaging -- python "${CLAUDE_SKILL_DIR}"/scripts/compare_requirements.py recipe/recipe.yaml
 ```
 
 It downloads the sdist for the recipe's version and checks that `source.sha256` matches it and that `source.url` is not a hash-based `files.pythonhosted.org` path. It then compares two sets of requirements:
@@ -154,7 +155,7 @@ For anything it reports under `REVIEW`, decide by hand:
 R feedstocks (`r-<name>`) take their source from CRAN (usually a list of two URLs: `{{ cran_mirror }}/src/contrib/<name>_<version>.tar.gz` and the `src/contrib/Archive/<name>/` fallback) or from a GitHub tag. Their dependency metadata is the package's `DESCRIPTION` file, not PyPI. Run from the feedstock root:
 
 ```bash
-pixi exec -s python -s pyyaml -- python "${CLAUDE_SKILL_DIR}"/scripts/compare_r_requirements.py recipe/recipe.yaml   # or recipe/meta.yaml
+pixi exec --force-reinstall -s python -s pyyaml -- python "${CLAUDE_SKILL_DIR}"/scripts/compare_r_requirements.py recipe/recipe.yaml   # or recipe/meta.yaml
 ```
 
 It downloads the source from the recipe's own rendered `source.url`, trying each URL in a list. It fills in the conda-forge global `cran_mirror` as `https://cloud.r-project.org`, verifies `source.sha256`, and compares `DESCRIPTION` with the recipe's `r-*` entries using conda-forge R conventions:
@@ -178,7 +179,7 @@ In v1 `recipe.yaml` recipes, a build script of `${{ PYTHON }} -m pip install . -
 
 When a new dependency or raised floor appears, check that conda-forge can satisfy it (`pixi search -c conda-forge <name>`). If it can't, still make the recipe match the metadata, and tell the user that CI will fail until that version is available. Do not act on the dependency's own feedstock.
 
-If the PR already has CI results, look at any failure before editing (`pixi exec cf-job-logs --gh list-jobs --json <PR_URL>`, then `download-log`), so the fix covers the actual error and not just the metadata diff.
+If the PR already has CI results, look at any failure before editing (`pixi exec --force-reinstall cf-job-logs --gh list-jobs --json <PR_URL>`, then `download-log`), so the fix covers the actual error and not just the metadata diff.
 
 Also check whether the upstream source still uses anything the metadata dropped (for example, grep the extracted sdist for imports of a removed package), and whether `tests.python.imports` or `build.python.entry_points` reference modules or entry points that no longer exist (compare `[project.scripts]` and the package list in `pyproject.toml` between the old and new sdists).
 
@@ -196,7 +197,7 @@ Host and run changes can go in the same commit; when the reason isn't obvious (e
 If host requirements changed, or the PR's CI was failing at the build step, confirm the fix with a local build before pushing:
 
 ```bash
-pixi exec rattler-build build --recipe recipe -m .ci_support/linux_64_.yaml --output-dir "$(mktemp -d -p <scratchpad>)"
+pixi exec --force-reinstall rattler-build build --recipe recipe -m .ci_support/linux_64_.yaml --output-dir "$(mktemp -d -p <scratchpad>)"
 ```
 
 Check that it ends with `all tests passed!` and that the installed version is the real one (e.g. `Successfully installed <name>-<version>`), not `0+unknown` or `0.0.0`.
