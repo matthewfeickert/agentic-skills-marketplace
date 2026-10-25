@@ -250,7 +250,27 @@ The new `headRefOid` may take a few seconds to update on GitHub, so re-query if 
 
 If the push is rejected with `(stale info)`, someone pushed to the PR branch after step 1, and the lease kept their commits from being overwritten. Stop: don't retry with `--force` or with a lease on the new head. Show the user what was pushed (`git fetch bot <head-branch>`, then `git log --format='%h %an: %s' <old headRefOid>..bot/<head-branch>`) and let them decide how to continue.
 
-## 7. Report
+## 7. Mark the PR checklist
+
+The bot's PR description has a "Checklist before merging this PR" with three items. After a successful run, mark the two that this skill confirms:
+
+- `Dependencies have been updated if changed`: tick it once the validation in step 3 reports `RESULT: MATCH` (after any requirements commit), or, when the script could not run, once every requirement was compared by hand.
+- `Tests have passed`: tick it once all CI checks on the PR's final head have passed (`gh pr checks <N> -R conda-forge/<feedstock>`). After a push, CI runs again, so wait for it to finish. If it fails, or is still running when you report, leave the box unticked and say so.
+
+Leave `Updated license if changed and license_file is packaged` alone unless the user asks; the skill doesn't check the license.
+
+Edit only those checkboxes, and keep the rest of the body unchanged:
+
+```bash
+gh pr view <N> -R conda-forge/<feedstock> --json body -q .body > <scratchpad>/pr<N>-body.md
+sed -i -e 's/^- \[ \] Dependencies have been updated/- [x] Dependencies have been updated/' \
+       -e 's/^- \[ \] Tests have passed/- [x] Tests have passed/' <scratchpad>/pr<N>-body.md
+gh pr edit <N> -R conda-forge/<feedstock> --body-file <scratchpad>/pr<N>-body.md
+```
+
+If the edit is refused (e.g. the account can't edit the PR), report which items are confirmed so the user can tick them by hand.
+
+## 8. Report
 
 Tell the user:
 - the new PR head SHA and whether GitHub reports it mergeable
@@ -261,4 +281,5 @@ Tell the user:
 - the validation result for run and host requirements: what mismatched, what the requirements commit changed, and any new floors that conda-forge cannot yet satisfy
 - the local build result, if one was run, and the cause of any CI failure found on the PR
 - the regeneration outcome, including whether an older regeneration commit was dropped so the regeneration commit is last
+- which PR checklist items were ticked, and why any were left unticked
 - the absolute path of the working clone and branch
