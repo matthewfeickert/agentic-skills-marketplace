@@ -1,7 +1,7 @@
 """Compare an R feedstock recipe's host/run requirements with the package DESCRIPTION.
 
 Usage (from the feedstock root):
-    pixi exec -s python -s pyyaml -- python compare_r_requirements.py [recipe/recipe.yaml | recipe/meta.yaml]
+    pixi exec --force-reinstall -s python -s pyyaml -- python compare_r_requirements.py [recipe/recipe.yaml | recipe/meta.yaml]
 
 Handles v1 recipe.yaml and, approximately, v0 meta.yaml (the format of most
 CRAN-generated R feedstocks): {% set %} variables and {{ }} expressions are

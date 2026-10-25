@@ -1,7 +1,7 @@
 """Compare a feedstock recipe's run and host requirements with the sdist's metadata.
 
 Usage (from the feedstock root):
-    pixi exec -s python -s pyyaml -s packaging -- python compare_requirements.py [recipe/recipe.yaml] [--pypi-name NAME]
+    pixi exec --force-reinstall -s python -s pyyaml -s packaging -- python compare_requirements.py [recipe/recipe.yaml] [--pypi-name NAME]
 
 Downloads the sdist for the recipe's version from PyPI, reads Requires-Dist and
 Requires-Python from its PKG-INFO and [build-system].requires from its
