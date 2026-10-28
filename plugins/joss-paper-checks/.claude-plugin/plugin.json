@@ -1,6 +1,6 @@
 {
   "name": "joss-paper-checks",
-  "description": "Check a paper submitted to the Journal of Open Source Software (JOSS) for spelling and grammar errors, mismatches with the review issue's metadata, broken URLs and DOIs, and logical inconsistencies.",
+  "description": "Check a paper submitted to the Journal of Open Source Software (JOSS) for spelling and grammar errors, mismatches with the review issue's metadata, broken URLs and DOIs, and logical inconsistencies, and find DOIs for the references that editorialbot's reference check skipped or could not find.",
   "version": "0.1.0",
   "author": {
     "name": "Matthew Feickert",
@@ -8,5 +8,5 @@
   },
   "repository": "https://github.com/matthewfeickert/agentic-skills-marketplace",
   "license": "MIT",
-  "keywords": ["joss", "journal-of-open-source-software", "paper", "review", "proofreading", "editorialbot"]
+  "keywords": ["joss", "journal-of-open-source-software", "paper", "review", "proofreading", "editorialbot", "doi"]
 }

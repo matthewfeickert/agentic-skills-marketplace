@@ -16,7 +16,7 @@
     {
       "name": "joss-paper-checks",
       "source": "./plugins/joss-paper-checks",
-      "description": "Check a paper submitted to the Journal of Open Source Software (JOSS) for spelling and grammar errors, mismatches with the review issue's metadata, broken URLs and DOIs, and logical inconsistencies."
+      "description": "Check a paper submitted to the Journal of Open Source Software (JOSS) for spelling and grammar errors, mismatches with the review issue's metadata, broken URLs and DOIs, and logical inconsistencies, and find DOIs for the references that editorialbot's reference check skipped or could not find."
     }
   ]
 }

@@ -1,6 +1,6 @@
 ---
 name: joss-paper-checks
-description: Check a paper submitted to the Journal of Open Source Software (JOSS) for its review. Given a JOSS review issue on openjournals/joss-reviews, parse the editorialbot submission metadata, clone the paper's repository and branch, and check the paper for spelling and grammar errors, mismatches between the paper's metadata (title, authors, ORCIDs) and the review issue, broken URLs and DOIs, and logical inconsistencies. Use when the user asks to check, proofread, or pre-review a JOSS paper or gives a joss-reviews issue URL.
+description: Check a paper submitted to the Journal of Open Source Software (JOSS) for its review. Given a JOSS review issue on openjournals/joss-reviews, parse the editorialbot submission metadata, clone the paper's repository and branch, and check the paper for spelling and grammar errors, mismatches between the paper's metadata (title, authors, ORCIDs) and the review issue, broken URLs and DOIs, and logical inconsistencies, and search Crossref and DataCite for DOIs of the references that editorialbot's reference check reported as SKIP or MISSING. Use when the user asks to check, proofread, or pre-review a JOSS paper or gives a joss-reviews issue URL.
 argument-hint: <openjournals/joss-reviews issue URL>
 allowed-tools: Bash, Read, Write, WebFetch
 ---
@@ -92,7 +92,38 @@ Exit code 2 or a traceback means the script failed. Read the error, and if the c
 
 For each `REVIEW` result (401, 403, 429, 5xx, timeout, or TLS error), confirm it with `WebFetch` before reporting it. Report it as broken only if that also fails, and otherwise say that the server refuses scripted requests. A URL with `)`, `]`, or `}` in it is cut off at that character, so a `BROKEN` result for such a URL needs a manual check. For a `redirects to` result, report a redirect to a different page (e.g. a moved repository, or a documentation URL that now lands on a generic page) as a suggestion to update the link. A redirect within the same site (e.g. `/` to `/en/latest/`) is fine.
 
-## 5. Spelling and grammar
+## 5. Find DOIs for references that editorialbot skipped or could not find
+
+`@editorialbot check references` posts a "Reference check summary" comment. Its `SKIP DOIs` section lists references without a DOI for which editorialbot found none, and its `MISSING DOIs` section lists references without a DOI for which it suggests one (or for which its Crossref lookup failed). editorialbot only searches Crossref by title, and accepts a match only within an edit distance of 3, so it misses DataCite DOIs (Zenodo, arXiv, figshare) and papers whose title differs slightly. Take the newest summary from the issue comments:
+
+```bash
+gh api --paginate repos/openjournals/joss-reviews/issues/<N>/comments --jq '.[]' \
+  | pixi exec --force-reinstall -s python -- python -I "${CLAUDE_SKILL_DIR}"/scripts/parse_reference_check.py \
+  > <scratchpad>/joss-<N>/reference-check.json
+```
+
+It exits 2 if editorialbot has not posted a reference check. In that case skip this step, and tell the user that they can run `@editorialbot check references` on the issue. Don't post it yourself. Compare the comment's `created_at` with the date of the last commit that changed the bibliography (`git log -1 --format=%cs -- <bibliography>`; in the shallow clone, this is the date of the checked commit). If the bibliography is newer, say that the summary may be out of date.
+
+If both `skip` and `missing` are empty, there is nothing to search for. Otherwise run from the directory that contains `paper.md`:
+
+```bash
+pixi exec --force-reinstall -s python -s 'bibtexparser>=2' -s pylatexenc -- python -I "${CLAUDE_SKILL_DIR}"/scripts/find_dois.py <scratchpad>/joss-<N>/reference-check.json paper.bib
+```
+
+editorialbot cuts each title to 50 characters, so the script maps each SKIP or MISSING title to its bibliography entry by prefix. It then searches Crossref (by title and first author, and as a free-text citation) and DataCite (by title). For a DOI that editorialbot suggested, it fetches the DOI's own metadata from doi.org. Each candidate is compared with the entry's title, author surnames, and year, and is printed as `LIKELY` (title similarity at least 0.9, and no author or year mismatch) or `POSSIBLE` (title similarity at least 0.75). The output ends with `RESULT: FOUND` if any reference has a `LIKELY` candidate, and `RESULT: NONE` otherwise, both with exit 0. `RESULT: ERROR` with exit 2 means the inputs could not be read. A `REVIEW` line means a registry lookup failed or the entry changed since the check, and says which.
+
+The scores are a starting point, not a verdict. For each reference, decide which DOI, if any, to suggest:
+
+- **Verify every DOI you suggest.** Fetch its metadata (`https://doi.org/<doi>` with `WebFetch`, or the registry record) and confirm that the title, authors, year, and venue all match the entry. A title match alone is not enough: corrections ("Author Correction: ..."), reviews of a paper ("Review of ..."), and book chapters with the same short title (e.g. "Ray Optics") match the title but are different works.
+- **Prefer the version of record.** If a journal or proceedings DOI exists, suggest it over a preprint (arXiv) or a software archive (Zenodo) DOI. Suggest a preprint DOI only when the cited work has no DOI of its own, e.g. a NeurIPS paper. Say that it is the preprint's DOI, so the authors can decide whether to add it.
+- **For software, choose between the Zenodo DOIs deliberately.** Zenodo gives each software release a version DOI, and also a concept DOI that always resolves to the latest release. Two consecutive Zenodo DOIs with the same title are usually the concept DOI and the first version DOI. Check which is which (the concept DOI's record lists all versions), and suggest the version DOI that matches the cited version or year, or the concept DOI if the entry cites the software in general.
+- **When the script finds nothing**, look in the cited project's repository (a DOI badge in the README, `CITATION.cff`, `.zenodo.json`) and on its documentation site before concluding that it has no DOI.
+- **Many references have no DOI**, e.g. commercial software, documentation websites, and GitHub repositories without a Zenodo archive. For these, SKIP is the correct outcome. Say so, and check that the entry has a working `url` instead (step 4 covers that).
+- For a `MISSING` suggestion from editorialbot, state whether it is the right DOI. editorialbot marks these as needing verification, and they can be wrong.
+
+For each DOI you suggest, give the bibliography key and the `doi = {...}` line to add, as a bare DOI without the `https://doi.org/` prefix, because editorialbot reports a prefixed DOI as INVALID.
+
+## 6. Spelling and grammar
 
 First run `codespell` as a deterministic pass for common misspellings:
 
@@ -112,7 +143,7 @@ Then read the whole of `paper.md`, including figure captions, table captions, an
 
 Don't flag proper nouns, citation keys, LaTeX or Pandoc syntax (`\autoref{}`, `{height="750px"}`), or deliberate style choices. For each finding, give `file:line`, the quoted text, and a suggested correction.
 
-## 6. Logical consistency
+## 7. Logical consistency
 
 Read the paper as a reviewer would, and check that it is consistent with itself and with its bibliography:
 
@@ -125,13 +156,14 @@ Read the paper as a reviewer would, and check that it is consistent with itself 
 
 Separate real inconsistencies from suggestions. A claim the paper doesn't support is a finding, but a matter of taste is not.
 
-## 7. Report
+## 8. Report
 
 Tell the user, in this order:
 
 - the issue, the repository, and the branch, commit SHA, and commit date that were checked, and the path of `paper.md`
 - the metadata result: each `MISMATCH` and `REVIEW` line from step 3, and the results of the manual checks
 - the URL result: each broken URL or DOI with its location, what the `WebFetch` check of each `REVIEW` result found, and the redirects worth updating
+- the DOI search: the reference check comment that was used and whether it may be out of date. For each SKIP and MISSING reference, give the bibliography key and either the verified DOI to add (as a `doi = {...}` line, saying whether it is a version of record, a preprint, or a software archive DOI), or why no DOI applies
 - spelling and grammar findings, with `file:line`, the quoted text, and a correction
 - logical inconsistencies, with `file:line`, the quoted text, and an explanation of why it is inconsistent
 - the absolute path of the working clone

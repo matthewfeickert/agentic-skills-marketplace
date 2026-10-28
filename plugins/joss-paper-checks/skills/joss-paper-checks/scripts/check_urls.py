@@ -85,12 +85,12 @@ def collect(paths, extra):
     return targets
 
 
-def request(url, method):
+def request(url, method, headers=None):
     """Return (status, final_url, body), retrying 429, 5xx, timeouts and connection errors.
 
-    The body is only read for GET requests.
+    The body is only read for GET requests. find_dois.py also uses this.
     """
-    req = urllib.request.Request(url, method=method, headers={"User-Agent": USER_AGENT})
+    req = urllib.request.Request(url, method=method, headers={"User-Agent": USER_AGENT, **(headers or {})})
     for attempt in range(ATTEMPTS):
         try:
             with urllib.request.urlopen(req, timeout=TIMEOUT) as response:
