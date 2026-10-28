@@ -3,8 +3,9 @@
 Usage: find_dois.py <reference-check.json> <paper.bib>
 
 <reference-check.json> is the output of parse_reference_check.py. Each SKIP
-or MISSING title is matched to its entry in <paper.bib>, which is then looked
-up in Crossref (https://api.crossref.org) and DataCite
+or MISSING title is matched to its entry in <paper.bib> by the entry's raw
+(undecoded) title, which is what editorialbot truncates. The entry is then
+looked up in Crossref (https://api.crossref.org) and DataCite
 (https://api.datacite.org). editorialbot only searches Crossref, by title, so
 DataCite DOIs (Zenodo, arXiv, figshare, ...) are never suggested by it. For a
 DOI that editorialbot suggested as MISSING, the DOI's own metadata is fetched
@@ -46,8 +47,7 @@ SHOWN = 3  # candidates printed per reference
 
 
 def fold(text):
-    """Casefold, drop accents, LaTeX braces and commands, and collapse whitespace."""
-    text = re.sub(r"\\[a-zA-Z]+\s*|\\.|[{}]", "", text)
+    """Casefold, drop accents, and collapse whitespace."""
     text = unicodedata.normalize("NFKD", text)
     text = "".join(c for c in text if not unicodedata.combining(c))
     return " ".join(text.casefold().split())
@@ -58,6 +58,8 @@ def words(text):
 
 
 def load_bib(path):
+    # editorialbot truncates the raw title, so keep it for matching next to the decoded one
+    raw_titles = {e.key: str(e.fields_dict["title"].value) for e in bibtexparser.parse_file(path).entries if "title" in e.fields_dict}
     library = bibtexparser.parse_file(path, append_middleware=[LatexDecodingMiddleware(), SeparateCoAuthors(), SplitNameParts()])
     entries = []
     for entry in library.entries:
@@ -69,6 +71,7 @@ def load_bib(path):
                 "key": entry.key,
                 "type": entry.entry_type,
                 "title": " ".join(str(fields["title"].value).split()) if "title" in fields else "",
+                "raw_title": raw_titles.get(entry.key, ""),
                 "surnames": [" ".join(name.last) for name in authors if name.last],
                 "year": int(year.group(0)) if year else None,
                 "doi": str(fields["doi"].value).strip() if "doi" in fields else None,
@@ -78,14 +81,9 @@ def load_bib(path):
 
 
 def match_entries(title, truncated, entries):
-    """Return the bib entries whose title is (or, if truncated, starts with) title."""
+    """Return the bib entries whose raw title is (or, if truncated, starts with) title."""
     wanted = fold(title)
-    exact = [e for e in entries if (fold(e["title"]).startswith(wanted) if truncated else fold(e["title"]) == wanted)]
-    if exact:
-        return exact
-    # LaTeX in the raw title that editorialbot truncated can defeat the prefix match
-    scored = [(difflib.SequenceMatcher(None, wanted, fold(e["title"])[: len(wanted)]).ratio(), e) for e in entries]
-    return [e for score, e in sorted(scored, key=lambda s: -s[0])[:1] if score >= 0.85]
+    return [e for e in entries if (fold(e["raw_title"]).startswith(wanted) if truncated else fold(e["raw_title"]) == wanted)]
 
 
 def year_of(date_parts):
@@ -96,21 +94,21 @@ def year_of(date_parts):
 
 
 def get_json(url, headers=None):
-    status, _, body = request(url, "GET", headers)
+    status, _, body = request(url, "GET", headers, read_body=True)
     if status >= 400:
         raise RuntimeError(f"HTTP {status} from {url}")
     return json.loads(body)
 
 
 def crossref(entry):
-    # Crossref's free-text query.bibliographic ranking can miss a well-known
-    # paper entirely (e.g. SciPy 1.0 in Nature Methods), while fielded title and
-    # author queries find it, so run both when the entry has authors
-    queries = [{"query.bibliographic": " ".join(filter(None, [entry["title"], str(entry["year"] or "")]))}]
-    if entry["surnames"]:
-        queries.insert(0, {"query.title": entry["title"], "query.author": entry["surnames"][0]})
+    # Crossref's free-text query.bibliographic ranking can leave a paper out of
+    # its top results even for an exact title (e.g. SciPy 1.0 in Nature Methods),
+    # while a fielded title and author query ranks it first. The free-text query
+    # still covers entries without authors, so run both.
+    fielded = [{"query.title": entry["title"], "query.author": entry["surnames"][0]}] if entry["surnames"] else []
+    bibliographic = {"query.bibliographic": " ".join(filter(None, [entry["title"], str(entry["year"] or "")]))}
     items = []
-    for query in queries:
+    for query in [*fielded, bibliographic]:
         params = {**query, "rows": ROWS, "select": "DOI,title,author,issued,type,container-title"}
         items += get_json("https://api.crossref.org/works?" + urllib.parse.urlencode(params))["message"]["items"]
     return [
@@ -169,6 +167,7 @@ def doi_metadata(doi):
 
 
 def score(entry, candidate):
+    """Return the candidate's verdict and how its title, authors and year compare with the entry."""
     title = difflib.SequenceMatcher(None, " ".join(words(entry["title"])), " ".join(words(candidate["title"]))).ratio()
     # None means there is nothing to compare, which is neither a match nor a mismatch
     authors = None
@@ -183,7 +182,7 @@ def score(entry, candidate):
         verdict = "POSSIBLE"
     else:
         verdict = None
-    return verdict, title, authors, year
+    return {"verdict": verdict, "title": title, "authors": authors, "year": year}
 
 
 def describe(value):
@@ -191,9 +190,8 @@ def describe(value):
 
 
 def search(entry, suggested_doi):
-    lookups = [("Crossref", lambda: crossref(entry)), ("DataCite", lambda: datacite(entry))]
-    if suggested_doi:
-        lookups.insert(0, ("doi.org", lambda: [doi_metadata(suggested_doi)]))
+    suggestion = [("doi.org", lambda: [doi_metadata(suggested_doi)])] if suggested_doi else []
+    lookups = [*suggestion, ("Crossref", lambda: crossref(entry)), ("DataCite", lambda: datacite(entry))]
     candidates, seen = [], set()
     for name, lookup in lookups:
         try:
@@ -206,9 +204,28 @@ def search(entry, suggested_doi):
             if candidate["doi"].casefold() not in seen:
                 seen.add(candidate["doi"].casefold())
                 candidates.append((score(entry, candidate), candidate))
-    shown = [(s, c) for s, c in candidates if s[0]]
-    shown.sort(key=lambda sc: (sc[0][0] != "LIKELY", -sc[0][1]))
+    shown = [(s, c) for s, c in candidates if s["verdict"]]
+    shown.sort(key=lambda sc: (sc[0]["verdict"] != "LIKELY", -sc[0]["title"]))
     return shown[:SHOWN]
+
+
+def report_entry(entry, suggested_doi):
+    """Print the entry and its candidate DOIs, and return whether any candidate is LIKELY."""
+    authors = ", ".join(entry["surnames"][:3]) + (" et al." if len(entry["surnames"]) > 3 else "")
+    print(f"  entry @{entry['type']}{{{entry['key']}}}: {entry['title']!r}, {authors or 'no authors'}, {entry['year'] or 'no year'}")
+    if entry["doi"]:
+        print(f"  REVIEW: the entry now has doi {entry['doi']!r}; rerun @editorialbot check references")
+        return False
+    candidates = search(entry, suggested_doi)
+    if not candidates:
+        print("  no candidate DOI found")
+    for s, c in candidates:
+        print(
+            f"  {s['verdict']}: {c['doi']} [{c['source']}, {c['type']}] {c['title']!r}, {', '.join(c['surnames'][:3])}, "
+            f"{c['year']}, {c['container'] or 'no container'} "
+            f"(title {s['title']:.2f}, authors {describe(s['authors'])}, year {describe(s['year'])})"
+        )
+    return any(s["verdict"] == "LIKELY" for s, _ in candidates)
 
 
 def main():
@@ -223,11 +240,11 @@ def main():
     print(f"reference check: {check['comment_url']} ({check['created_at']})")
     found = 0
     for section in ("skip", "missing"):
+        label = section.upper()
         for item in check[section]:
-            label = section.upper()
-            if item["kind"] == "other":
+            if item["kind"] in {"untitled", "other"}:
                 print(f"\n{label}: {item['message']}")
-                if item["message"].startswith("Entry without DOI or title"):
+                if item["kind"] == "untitled":
                     untitled = [e["key"] for e in entries if not e["doi"] and not e["title"]]
                     print(f"  entries without DOI or title: {', '.join(untitled) or 'none (fixed since the check?)'}")
                 continue
@@ -242,22 +259,7 @@ def main():
                 print("  REVIEW: no entry in the bibliography has this title (changed since the check?)")
                 continue
             for entry in matches:
-                authors = ", ".join(entry["surnames"][:3]) + (" et al." if len(entry["surnames"]) > 3 else "")
-                print(
-                    f"  entry @{entry['type']}{{{entry['key']}}}: {entry['title']!r}, {authors or 'no authors'}, {entry['year'] or 'no year'}"
-                )
-                if entry["doi"]:
-                    print(f"  REVIEW: the entry now has doi {entry['doi']!r}; rerun @editorialbot check references")
-                    continue
-                candidates = search(entry, suggestion)
-                if not candidates:
-                    print("  no candidate DOI found")
-                for (verdict, title, author, year), c in candidates:
-                    print(
-                        f"  {verdict}: {c['doi']} [{c['source']}, {c['type']}] {c['title']!r}, {', '.join(c['surnames'][:3])}, "
-                        f"{c['year']}, {c['container'] or 'no container'} (title {title:.2f}, authors {describe(author)}, year {describe(year)})"
-                    )
-                found += any(verdict == "LIKELY" for (verdict, *_), _ in candidates)
+                found += report_entry(entry, suggestion)
 
     print(f"\n{found} references with a LIKELY DOI")
     print("RESULT: FOUND" if found else "RESULT: NONE")

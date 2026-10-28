@@ -23,6 +23,7 @@ ITEM_FORMATS = (
     ("skip", re.compile(r"^No DOI given, and none found for title: (?P<title>.*)$")),
     ("suggestion", re.compile(r"^(?P<doi>\S+) may be a valid DOI for title: (?P<title>.*)$")),
     ("crossref_error", re.compile(r'^Errored finding suggestions for "(?P<title>.*)", please try later$')),
+    ("untitled", re.compile(r"^Entry without DOI or title found$")),
 )
 
 
@@ -36,7 +37,7 @@ def parse_item(text):
                 item["truncated"] = item["title"].endswith("...")
                 item["title"] = item["title"].removesuffix("...")
             return item
-    # e.g. "Entry without DOI or title found" or the 10.5555 handle special case
+    # e.g. the 10.5555 handle special case
     return {"kind": "other", "message": text}
 
 
@@ -51,12 +52,9 @@ def parse_summary(body):
             text = line[2:].strip()
             if text != "None":
                 current.append(text)
-    return {
-        "ok": sections["ok"],
-        "skip": [parse_item(text) for text in sections["skip"]],
-        "missing": [parse_item(text) for text in sections["missing"]],
-        "invalid": sections["invalid"],
-    }
+    for key in ("skip", "missing"):
+        sections[key] = [parse_item(text) for text in sections[key]]
+    return sections
 
 
 def main():

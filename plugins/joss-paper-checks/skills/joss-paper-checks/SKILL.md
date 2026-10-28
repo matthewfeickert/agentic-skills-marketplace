@@ -80,10 +80,10 @@ The issue only records the submitting author, so the other authors' names can't 
 Run from the directory that contains `paper.md`, so the reported locations are short, and pass the issue's repository and archive DOI as extras (leave out a `null` archive DOI):
 
 ```bash
-pixi exec --force-reinstall -s python -- python -I "${CLAUDE_SKILL_DIR}"/scripts/check_urls.py paper.md paper.bib --extra <repository> <archive_doi>
+pixi exec --force-reinstall -s python -s 'bibtexparser>=2' -- python -I "${CLAUDE_SKILL_DIR}"/scripts/check_urls.py paper.md paper.bib --extra <repository> <archive_doi>
 ```
 
-It checks every `http(s)` URL in the given files and every `doi` field in the `.bib` file. URLs are checked with HEAD, then with GET if HEAD fails. DOIs, including `https://doi.org/` URLs, are checked against the DOI handle API, because many publishers answer scripted requests with 403 even for valid DOIs. Each URL or DOI is checked once, and the output lists every place it appears. The output ends with a `RESULT:` line:
+It checks every `http(s)` URL in the given files and every `doi` field in the `.bib` file, once each, and lists every place each one appears (for `.bib` entries, the entry's first line and key). DOIs are checked against the DOI handle API rather than by following them to the publisher, which often refuses scripted requests. The output ends with a `RESULT:` line:
 
 - `RESULT: OK`, exit 0: nothing is `BROKEN`.
 - `RESULT: BROKEN`, exit 1: at least one URL or DOI returned 404 or 410, has an unknown host, or is not registered.
@@ -110,7 +110,7 @@ If both `skip` and `missing` are empty, there is nothing to search for. Otherwis
 pixi exec --force-reinstall -s python -s 'bibtexparser>=2' -s pylatexenc -- python -I "${CLAUDE_SKILL_DIR}"/scripts/find_dois.py <scratchpad>/joss-<N>/reference-check.json paper.bib
 ```
 
-editorialbot cuts each title to 50 characters, so the script maps each SKIP or MISSING title to its bibliography entry by prefix. It then searches Crossref (by title and first author, and as a free-text citation) and DataCite (by title). For a DOI that editorialbot suggested, it fetches the DOI's own metadata from doi.org. Each candidate is compared with the entry's title, author surnames, and year, and is printed as `LIKELY` (title similarity at least 0.9, and no author or year mismatch) or `POSSIBLE` (title similarity at least 0.75). The output ends with `RESULT: FOUND` if any reference has a `LIKELY` candidate, and `RESULT: NONE` otherwise, both with exit 0. `RESULT: ERROR` with exit 2 means the inputs could not be read. A `REVIEW` line means a registry lookup failed or the entry changed since the check, and says which.
+The script maps each SKIP or MISSING title, which editorialbot cuts to 50 characters, to its bibliography entry. It searches Crossref and DataCite for the entry, and for a DOI that editorialbot suggested, it also fetches the DOI's own metadata. Each candidate is printed as `LIKELY` or `POSSIBLE`, with how its title, authors, and year compare with the entry; the script's docstring has the thresholds. The output ends with `RESULT: FOUND` if any reference has a `LIKELY` candidate, and `RESULT: NONE` otherwise, both with exit 0. `RESULT: ERROR` with exit 2 means the inputs could not be read. A `REVIEW` line means a registry lookup failed or the entry changed since the check, and says which.
 
 The scores are a starting point, not a verdict. For each reference, decide which DOI, if any, to suggest:
 

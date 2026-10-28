@@ -3,8 +3,10 @@
 Usage: check_urls.py [--workers N] [--extra URL_OR_DOI ...] <file> [<file> ...]
 
 Collects every http(s) URL from the given files (paper.md, paper.bib) and
-every `doi` field from .bib files, then checks each one once. DOIs, including
-https://doi.org/ URLs, are checked against the DOI handle API
+every `doi` field from .bib files, then checks each one once. The .bib files
+are read with bibtexparser, so fields that span several lines are handled.
+
+DOIs, including https://doi.org/ URLs, are checked against the DOI handle API
 (https://www.doi.org/the-identifier/resources/factsheets/doi-resolution-documentation)
 instead of by following them to the publisher, because many publishers answer
 scripted requests with 403 even when the DOI is valid.
@@ -32,8 +34,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections import defaultdict
+from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
+
+import bibtexparser
 
 TIMEOUT = 30  # seconds per request
 ATTEMPTS = 3
@@ -41,11 +45,12 @@ BACKOFF = 2  # seconds, doubled after each failed attempt: 2, 4
 USER_AGENT = "joss-paper-checks (+https://github.com/matthewfeickert/agentic-skills-marketplace)"
 
 # Stops at whitespace and at the delimiters that close a URL in Markdown
-# (`)`, `]`, `>`) and BibTeX (`}`, `"`). URLs that themselves contain these
+# (`)`, `]`, `>`) and LaTeX (`\url{...}`). URLs that themselves contain these
 # characters are rare in papers, and are then reported as BROKEN for review.
 URL = re.compile(r"https?://[^\s<>\"'(){}\[\]]+")
-BIB_DOI = re.compile(r"\bdoi\s*=\s*[{\"]\s*([^}\"\s]+)", re.IGNORECASE)
 DOI_URL = re.compile(r"^https?://(?:dx\.)?doi\.org/(.+)$", re.IGNORECASE)
+# LaTeX escapes that occur in URLs. The fields are not decoded with
+# pylatexenc, as it would read an unescaped % in a URL as a comment.
 BIB_ESCAPES = {r"\_": "_", r"\%": "%", r"\&": "&", r"\#": "#", r"\~{}": "~"}
 # Status codes servers use to refuse scripted requests rather than to say the page is gone
 REFUSED = {401, 403, 429, 999}
@@ -59,42 +64,48 @@ def collect(paths, extra):
         value = value.rstrip(".,;:!?")
         doi = DOI_URL.match(value)
         if doi:
-            targets[("doi", urllib.parse.unquote(doi.group(1)))].append(location)
+            target = ("doi", urllib.parse.unquote(doi.group(1)))
         elif value.startswith(("http://", "https://")):
-            targets[("url", value)].append(location)
+            target = ("url", value)
         else:
-            targets[("doi", re.sub(r"^doi:\s*", "", value, flags=re.IGNORECASE))].append(location)
+            target = ("doi", re.sub(r"^doi:\s*", "", value, flags=re.IGNORECASE))
+        # An entry's doi and url fields often hold the same DOI
+        if location not in targets[target]:
+            targets[target].append(location)
 
     for path in paths:
-        is_bib = path.endswith(".bib")
-        with open(path, encoding="utf-8") as f:
-            for number, line in enumerate(f, start=1):
-                location = f"{path}:{number}"
-                if is_bib:
+        if path.endswith(".bib"):
+            for entry in bibtexparser.parse_file(path).entries:
+                location = f"{path}:{entry.start_line + 1} ({entry.key})"
+                for field in entry.fields:
+                    value = str(field.value)
                     for escaped, plain in BIB_ESCAPES.items():
-                        line = line.replace(escaped, plain)
-                    doi_fields = list(BIB_DOI.finditer(line))
-                    for match in doi_fields:
-                        add(match.group(1), location)
-                    # A doi field holding a URL is already handled above
-                    line = BIB_DOI.sub("", line)
-                for match in URL.finditer(line):
-                    add(match.group(0), location)
+                        value = value.replace(escaped, plain)
+                    if field.key.lower() == "doi":
+                        add(value.strip(), location)
+                    else:
+                        for match in URL.finditer(value):
+                            add(match.group(0), location)
+        else:
+            with open(path, encoding="utf-8") as f:
+                for number, line in enumerate(f, start=1):
+                    for match in URL.finditer(line):
+                        add(match.group(0), f"{path}:{number}")
     for value in extra:
         add(value, "issue")
     return targets
 
 
-def request(url, method, headers=None):
+def request(url, method, headers=None, read_body=False):
     """Return (status, final_url, body), retrying 429, 5xx, timeouts and connection errors.
 
-    The body is only read for GET requests. find_dois.py also uses this.
+    The body is empty unless read_body is set. find_dois.py also uses this.
     """
     req = urllib.request.Request(url, method=method, headers={"User-Agent": USER_AGENT, **(headers or {})})
     for attempt in range(ATTEMPTS):
         try:
             with urllib.request.urlopen(req, timeout=TIMEOUT) as response:
-                return response.status, response.url, response.read() if method == "GET" else b""
+                return response.status, response.url, response.read() if read_body else b""
         except urllib.error.HTTPError as e:
             if e.code != 429 and e.code < 500:
                 return e.code, url, b""
@@ -113,7 +124,7 @@ def request(url, method, headers=None):
 
 def check_doi(doi):
     api = "https://doi.org/api/handles/" + urllib.parse.quote(doi, safe="/")
-    status, _, body = request(api, "GET")
+    status, _, body = request(api, "GET", read_body=True)
     # The handle API answers 404 with responseCode 100 for an unregistered DOI
     if status == 404:
         return "BROKEN", "DOI is not registered"
@@ -173,7 +184,7 @@ def main():
         label = f"doi:{value}" if kind == "doi" else value
         print(f"{status}: {label} ({detail}) at {', '.join(targets[(kind, value)])}")
 
-    counts = {status: sum(1 for s, _ in results.values() if s == status) for status in order}
+    counts = Counter(status for status, _ in results.values())
     print(f"checked {len(results)}: {counts['OK']} OK, {counts['REVIEW']} REVIEW, {counts['BROKEN']} BROKEN")
     if counts["BROKEN"]:
         print("RESULT: BROKEN")

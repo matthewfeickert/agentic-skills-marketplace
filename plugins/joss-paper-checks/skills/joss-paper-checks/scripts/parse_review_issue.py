@@ -33,6 +33,17 @@ def marker(body, name):
     return re.sub(r"<[^>]+>", "", match.group(1)).strip() if match else None
 
 
+def value(body, name):
+    """Return the marker's value, or None if it is unset or a placeholder such as "Pending"."""
+    text = marker(body, name)
+    return None if (text or "").casefold() in PLACEHOLDERS else text
+
+
+def first_handle(body, name):
+    """Return the first GitHub handle in the marker's value, or None."""
+    return (handles(marker(body, name)) or [None])[0]
+
+
 def handles(text):
     """Return the GitHub handles in a marker value, without the leading @."""
     return re.findall(r"@([A-Za-z0-9-]+)", text or "")
@@ -64,21 +75,19 @@ def main():
         else:
             author_name = author_line.group(1).strip()
 
-    archive = marker(body, "archive")
-    version = marker(body, "version")
     result = {
         "issue_number": issue["number"],
         "issue_url": issue["url"],
         "title": TITLE_PREFIX.sub("", issue["title"]).strip(),
-        "submitting_author_handle": (handles(marker(body, "author-handle")) or [None])[0],
+        "submitting_author_handle": first_handle(body, "author-handle"),
         "submitting_author_name": author_name,
         "submitting_author_orcid": author_orcid,
         "repository": repository.removesuffix(".git").rstrip("/"),
         # An empty branch means the paper is on the default branch
         "branch": marker(body, "branch") or None,
-        "version": None if (version or "").casefold() in PLACEHOLDERS else version,
-        "archive_doi": None if (archive or "").casefold() in PLACEHOLDERS else archive,
-        "editor": (handles(marker(body, "editor")) or [None])[0],
+        "version": value(body, "version"),
+        "archive_doi": value(body, "archive"),
+        "editor": first_handle(body, "editor"),
         "reviewers": handles(marker(body, "reviewers-list")),
     }
     json.dump(result, sys.stdout, indent=2, ensure_ascii=False)
