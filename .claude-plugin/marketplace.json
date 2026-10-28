@@ -12,6 +12,11 @@
       "name": "conda-forge-pr-rebase",
       "source": "./plugins/conda-forge-pr-rebase",
       "description": "Rebase an open conda-forge feedstock PR onto upstream main, validate its run and host requirements against the package metadata, regenerate with conda-smithy, and force-push to the PR branch."
+    },
+    {
+      "name": "joss-paper-checks",
+      "source": "./plugins/joss-paper-checks",
+      "description": "Check a paper submitted to the Journal of Open Source Software (JOSS) for spelling and grammar errors, mismatches with the review issue's metadata, broken URLs and DOIs, and logical inconsistencies, and find DOIs for the references that editorialbot's reference check skipped or could not find."
     }
   ]
 }
