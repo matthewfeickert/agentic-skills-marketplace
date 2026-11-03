@@ -8,5 +8,5 @@
   },
   "repository": "https://github.com/matthewfeickert/agentic-skills-marketplace",
   "license": "MIT",
-  "keywords": ["conda-forge", "feedstock", "rebase", "conda-smithy", "regro-cf-autotick-bot", "rust", "go"]
+  "keywords": ["conda-forge", "feedstock", "rebase", "conda-smithy", "regro-cf-autotick-bot", "python", "r", "rust", "go"]
 }
