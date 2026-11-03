@@ -1,11 +1,11 @@
 ---
 name: conda-forge-pr-rebase
-description: Rebase an open conda-forge feedstock PR (typically a regro-cf-autotick-bot version bump) onto the head of the upstream main branch, validate the recipe's run and host requirements against the package metadata (a Python sdist's PKG-INFO and build-system table, or an R package's DESCRIPTION), add a requirements commit if needed, regenerate with conda-smithy, and force-push to the PR branch. Use when the user asks to rebase a conda-forge feedstock PR or bring a bot version-bump PR up to date with main.
+description: Rebase an open conda-forge feedstock PR (typically a regro-cf-autotick-bot version bump) onto the head of the upstream main branch, validate the recipe's run and host requirements against the package metadata (a Python sdist's PKG-INFO and build-system table, an R package's DESCRIPTION, or for Rust and Go packages the Cargo.lock or go.mod, binaries, toolchain version and bundled third-party licenses compared with the previous version's source), add a requirements commit if needed, regenerate with conda-smithy, and force-push to the PR branch. Use when the user asks to rebase a conda-forge feedstock PR or bring a bot version-bump PR up to date with main.
 argument-hint: <conda-forge feedstock PR URL>
 allowed-tools: Bash, Read, Edit, Write
 ---
 
-Rebase the conda-forge feedstock PR given in `$ARGUMENTS` onto upstream `main`, make its run and host requirements match the released sdist, regenerate, and push back to the PR's branch.
+Rebase the conda-forge feedstock PR given in `$ARGUMENTS` onto upstream `main`, make its run and host requirements match the released package's metadata, regenerate, and push back to the PR's branch.
 
 ## Scope rules
 
@@ -118,11 +118,18 @@ curl -sL https://pypi.org/packages/source/<l>/<name>/<sdist-filename> | sha256su
 
 If the PR's CI failed with a `503 Service Unavailable` while downloading the source, that is a transient PyPI outage, not a recipe problem. Don't change the URL to work around it; report it so the job can be rerun.
 
-## 3. Validate run and host requirements against the sdist metadata
+## 3. Validate run and host requirements against the package metadata
 
-Pick the script by package type. R packages (`r-*` feedstocks, built with `R CMD INSTALL`) use `compare_r_requirements.py`; see [R packages](#r-packages) below. Everything else, i.e. Python packages from PyPI, uses `compare_requirements.py`.
+Pick the script by package type, from the compilers in `requirements.build`:
 
-Both scripts end with a `RESULT:` line and an exit code:
+- `${{ compiler('rust') }}`: `compare_rust_requirements.py`; see [Rust and Go packages](#rust-and-go-packages).
+- `${{ compiler('go-nocgo') }}` or `${{ compiler('go-cgo') }}`: `compare_go_requirements.py`; see [Rust and Go packages](#rust-and-go-packages).
+- R packages (`r-*` feedstocks, built with `R CMD INSTALL`): `compare_r_requirements.py`; see [R packages](#r-packages).
+- Python packages from PyPI: `compare_requirements.py`; see [Python packages](#python-packages).
+
+For any other package type no script applies. Compare the requirements by hand against the upstream build files, and tell the user that no script covers it.
+
+All scripts end with a `RESULT:` line and an exit code:
 
 - `RESULT: MATCH`, exit 0: the recipe matches the metadata.
 - `RESULT: MISMATCH`, exit 1: the recipe differs from the metadata; the lines above it say how.
@@ -175,6 +182,39 @@ For anything it reports under `REVIEW`, decide by hand:
 
 For a local build of an R feedstock, use one of its variant files, e.g. `.ci_support/linux_64_r_base4.5.yaml`.
 
+### Rust and Go packages
+
+Rust and Go packages have no released metadata that lists conda requirements: their dependencies are compiled in from `Cargo.lock` or `go.mod`, and only native libraries, compilers and build tools appear in the recipe. So these scripts compare the PR's source with the source of the version on `main`, and check the recipe against what changed. Run from the feedstock root:
+
+```bash
+pixi exec --force-reinstall -s python -s pyyaml -- python "${CLAUDE_SKILL_DIR}"/scripts/compare_rust_requirements.py recipe/recipe.yaml   # Rust
+pixi exec --force-reinstall -s python -s pyyaml -- python "${CLAUDE_SKILL_DIR}"/scripts/compare_go_requirements.py recipe/recipe.yaml     # Go
+```
+
+Both download the recipe's main source (the `source` entry whose URL uses the version) and the source of the version in `origin/main`'s recipe (`--base-ref` changes the ref), and verify `source.sha256`. They read both archives in memory and never extract or run them. They then follow the build script as it would run on linux-64: `if:` conditions are evaluated for that platform, `cd`, `pushd` and `popd` are tracked, and `target_directory` is honored, so paths resolve the way the build sees them. A rebuild PR (same version as `main`) skips the comparisons with the base version.
+
+Both scripts check:
+
+- **Licenses:** the third-party license bundle that the build writes (`cargo-bundle-licenses --output <file>` for Rust, `go-licenses save --save_path <dir>` for Go) must be in `about.license_file`. Every `license_file` entry must exist in the source, in another source's `file_name`, or in the recipe directory. Either problem is a mismatch. License files that changed since the base version, a changed crate `license` field, and top-level `LICENSE*`/`COPYING*`/`NOTICE*` files not in `license_file` are reported for review.
+- **Compiler version:** the source's minimum (`rust-version` in `Cargo.toml`, including one inherited from the workspace, or the `go` directive in `go.mod`) is compared with `rust_compiler_version`/`go_compiler_version` in `.ci_support/*.yaml`, or, as conda-forge normally leaves these unpinned, with the newest `rust`/`go` on conda-forge. A minimum newer than that is reported for review: no recipe change fixes it, so tell the user that CI will fail until conda-forge's compiler is updated.
+
+The Rust script also checks:
+
+- **Crates and binaries:** each `cargo install --path <dir>` is resolved to its crate. Its binaries come from `[[bin]]` targets and Cargo's auto-discovery (`src/main.rs`, `src/bin/`), or from `--bin`. A binary that a `package_contents` test lists but the crate no longer defines is a mismatch, and so is a new binary that a `strict: true` `package_contents` test doesn't list, because the strict test would fail. A missing `Cargo.lock` is a mismatch when the build uses `--locked`. A crate directory that existed in the base version but is gone is a mismatch.
+- **`Cargo.lock` changes:** crates added, removed and changed since the base version.
+- **Native code:** new `-sys` crates (other than pure OS bindings such as `windows-sys`) and new build-script helper crates (`cmake`, `pkg-config`, `bindgen`, `cc`). For `-sys` crates of libraries that conda-forge packages (`openssl-sys`, `libgit2-sys`, `libssh2-sys`, `libz-sys`, `zstd-sys`, `libsqlite3-sys`, `bzip2-sys`, `curl-sys`), the review line names the host package and the variable that makes the crate use it instead of building a bundled copy (e.g. `LIBGIT2_NO_VENDOR=1`). `Cargo.lock` lists crates for every feature and target, so a new crate may not be built at all: check the crate's features and the build log before adding host requirements. Changes to the crate's `build.rs` are also reported for review, because a build script can start linking a native library without any `-sys` crate.
+
+The Go script also checks:
+
+- **Packages and binaries:** each local package that `go build`, `go install` or `go run` uses must exist in the source. A package directory that existed in the base version but is gone is a mismatch, because upstream moved it and the build script must follow. Binaries named by `-o` are compared with the `package_contents` tests for review only, since Go names a binary built without `-o` after its directory or module.
+- **`go.mod` changes:** requirements added, removed and changed since the base version, a changed `go` directive, and a changed module path (for review).
+- **cgo:** files with `import "C"` in the module (and in `vendor/` when dependencies are vendored) are reported for review when the recipe uses `go-nocgo`. That is fine when they sit behind a `cgo` build tag with a pure-Go fallback. Otherwise the recipe needs `${{ compiler('go-cgo') }}` with `${{ compiler('c') }}` and `${{ stdlib('c') }}`. New requirements on known cgo modules (e.g. `github.com/mattn/go-sqlite3`) are reported too. Dependencies are not downloaded, so cgo in an unvendored dependency only shows up in the build.
+- A build through `make` or another wrapper has no `go build` to follow. The script then compares the top-level `go.mod` only and says that package paths and binaries were not checked; read the `Makefile` by hand for moved packages.
+
+Only v1 `recipe.yaml` recipes with a single output are supported; anything else exits with `RESULT: ERROR`, so compare by hand. Git and local-path sources are not supported either. Additional `url` sources without a `file_name` are not downloaded and are listed for review.
+
+Fix each kind of mismatch in its own commit after the bot's commits (see [step 4](#4-requirements-commit-only-if-needed)): new host libraries, `pkg-config` and vendoring variables in `MNT: Update to v<version> requirements`, and a third-party license bundle missing from `about.license_file` in `MNT: Package third-party licenses`. For a moved package path or a renamed binary, update the build script and tests in a commit that says what moved upstream. Confirm all of these with a local build.
+
 In v1 `recipe.yaml` recipes, a build script of `${{ PYTHON }} -m pip install . -vv` without `--no-deps --no-build-isolation` is correct, because rattler-build enforces those pip settings itself. Don't add the flags.
 
 When a new dependency or raised floor appears, check that conda-forge can satisfy it (`pixi search -c conda-forge <name>`). If it can't, still make the recipe match the metadata, and tell the user that CI will fail until that version is available. Do not act on the dependency's own feedstock.
@@ -194,7 +234,7 @@ git commit -m "MNT: Update to v<version> requirements" -m "Assisted-by: ClaudeCo
 
 Host and run changes can go in the same commit; when the reason isn't obvious (e.g. a build-backend or versioneer change), explain it in the commit body. Match the repository's style from step 1 if it differs. Re-run the validation script until it reports `RESULT: MATCH`.
 
-If host requirements changed, or the PR's CI was failing at the build step, confirm the fix with a local build before pushing:
+If host requirements changed, a Rust or Go build script or `license_file` changed, or the PR's CI was failing at the build step, confirm the fix with a local build before pushing:
 
 ```bash
 pixi exec --force-reinstall rattler-build build --recipe recipe -m .ci_support/linux_64_.yaml --output-dir "$(mktemp -d -p <scratchpad>)"
@@ -253,19 +293,20 @@ If the push is rejected with `(stale info)`, someone pushed to the PR branch aft
 
 ## 7. Mark the PR checklist
 
-The bot's PR description has a "Checklist before merging this PR" with three items. After a successful run, mark the two that this skill confirms:
+The bot's PR description has a "Checklist before merging this PR" with three items. After a successful run, mark the ones that this skill confirms:
 
 - `Dependencies have been updated if changed`: tick it once the validation in step 3 reports `RESULT: MATCH` (after any requirements commit), or, when the script could not run, once every requirement was compared by hand.
 - `Tests have passed`: tick it once all CI checks on the PR's final head have passed (`gh pr checks <N> -R conda-forge/<feedstock>`). After a push, CI runs again, so wait for it to finish. If it fails, or is still running when you report, leave the box unticked and say so.
+- `Updated license if changed and license_file is packaged`: only for Rust and Go packages, whose scripts check licenses. Tick it once the script's `licenses` section reports no `MISMATCH` (after any license commit) and every `REVIEW` line in it was resolved, e.g. a changed license file was read and `about.license` still matches it. For Python and R packages, leave it alone unless the user asks; the skill doesn't check their licenses.
 
-Leave `Updated license if changed and license_file is packaged` alone unless the user asks; the skill doesn't check the license.
-
-Edit only those checkboxes, and keep the rest of the body unchanged:
+Drop any `sed` expression for an item that isn't confirmed. Edit only those checkboxes, and keep the rest of the body unchanged:
 
 ```bash
 gh pr view <N> -R conda-forge/<feedstock> --json body -q .body > <scratchpad>/pr<N>-body.md
 sed -i -e 's/^- \[ \] Dependencies have been updated/- [x] Dependencies have been updated/' \
        -e 's/^- \[ \] Tests have passed/- [x] Tests have passed/' <scratchpad>/pr<N>-body.md
+# Rust and Go only, when the license check passed:
+sed -i 's/^- \[ \] Updated license if changed/- [x] Updated license if changed/' <scratchpad>/pr<N>-body.md
 gh pr edit <N> -R conda-forge/<feedstock> --body-file <scratchpad>/pr<N>-body.md
 ```
 
@@ -280,6 +321,7 @@ Tell the user:
 - for rebuild PRs, the PR's and `main`'s build numbers, and whether the build number had to be restored
 - whether the bot changed `source.url`, and whether it was restored
 - the validation result for run and host requirements: what mismatched, what the requirements commit changed, and any new floors that conda-forge cannot yet satisfy
+- for Rust and Go packages, the `Cargo.lock`/`go.mod` changes in brief, any new native or cgo dependencies and how they were resolved, the compiler-version check, the license check and any license commit, and the `REVIEW` lines left for the user
 - the local build result, if one was run, and the cause of any CI failure found on the PR
 - the regeneration outcome, including whether an older regeneration commit was dropped so the regeneration commit is last
 - which PR checklist items were ticked, and why any were left unticked
