@@ -21,11 +21,8 @@ Only v1 recipe.yaml with a single output is supported.
 Exits 0 on a match, 1 on any mismatch, and 2 if the script fails to run.
 """
 
-import argparse
 import posixpath
-import sys
 import tomllib
-import traceback
 from pathlib import Path
 
 from compiled_recipe import (
@@ -34,10 +31,13 @@ from compiled_recipe import (
     check_toolchain,
     commands,
     compare_bins,
-    download_source,
-    join,
     load_recipe,
+    load_sources,
     option,
+    parse_args,
+    print_changes,
+    resolve,
+    run,
     version_tuple,
 )
 
@@ -64,7 +64,7 @@ BUILD_TOOLS = {"cmake": "cmake", "pkg-config": "pkg-config", "bindgen": "libclan
 
 
 def manifest(work, directory):
-    path = posixpath.join(directory, "Cargo.toml") if directory != "." else "Cargo.toml"
+    path = resolve(directory, "Cargo.toml")
     return tomllib.loads(work.text(path)) if work.is_file(path) else None
 
 
@@ -75,7 +75,7 @@ def workspace_root(work, directory):
         m = manifest(work, d)
         if m is not None and "workspace" in m:
             return d, m
-        if d in ("", "."):
+        if d == ".":
             return directory, manifest(work, directory)
         d = posixpath.dirname(d) or "."
 
@@ -90,7 +90,7 @@ def inherited(package, key, ws_manifest):
 def binaries(work, directory, man):
     """Names of the binary targets of the package in directory (Cargo's target auto-discovery)."""
     def rel(p):
-        return posixpath.normpath(posixpath.join(directory, p))
+        return resolve(directory, p)
 
     package = man["package"]
     names, paths = set(), set()
@@ -115,7 +115,7 @@ def binaries(work, directory, man):
     return names
 
 
-def analyse(recipe, work):
+def analyse(recipe):
     """The crates the build installs and what the build script bundles."""
     installs, generated = [], {}
     for cwd, tokens in commands(recipe):
@@ -125,30 +125,27 @@ def analyse(recipe, work):
         if tokens[0] == "cargo" and rest[:1] == ["install"]:
             paths = option(rest, "--path")
             installs.append({
-                "dir": join(cwd, paths[0]) if paths else None,
+                "dir": resolve(cwd, paths[0]) if paths else None,
                 "raw": paths[0] if paths else None,
                 "locked": "--locked" in rest,
                 "bins": option(rest, "--bin"),
             })
         elif tokens[0] == "cargo-bundle-licenses":
             outputs = option(tokens, "--output", "-o")
-            generated[join(cwd, outputs[0]) if outputs else None] = "cargo-bundle-licenses"
+            generated[resolve(cwd, outputs[0]) if outputs else None] = "cargo-bundle-licenses"
     return installs, generated
 
 
 def lock_packages(work, path):
-    """{crate name: {versions}} from Cargo.lock at path."""
-    packages = {}
+    """{crate name: its versions, comma-separated} from Cargo.lock at path."""
+    versions = {}
     for p in tomllib.loads(work.text(path)).get("package", []):
-        packages.setdefault(p["name"], set()).add(p["version"])
-    return packages
+        versions.setdefault(p["name"], set()).add(p["version"])
+    return {name: ",".join(sorted(v)) for name, v in versions.items()}
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("recipe", nargs="?", default="recipe/recipe.yaml")
-    parser.add_argument("--base-ref", default="origin/main", help="git ref with the base version's recipe")
-    args = parser.parse_args()
+    args = parse_args()
     feedstock_root = Path(args.recipe).resolve().parent.parent
     report = Report()
 
@@ -156,21 +153,10 @@ def main():
     if "compiler:rust" not in recipe.requirements("build"):
         raise RuntimeError("not a Rust recipe: no ${{ compiler('rust') }} in requirements.build")
     print(f"recipe version: {recipe.version}")
-    work = download_source(recipe, report)
-
-    base = load_recipe(args.recipe, args.base_ref)
-    base_work = None
-    if base is None:
-        report.info(f"no recipe at {args.base_ref}; nothing to compare against")
-    elif base.version == recipe.version:
-        report.info(f"{args.base_ref} has the same version {base.version} (rebuild); source unchanged")
-    else:
-        print(f"base version ({args.base_ref}): {base.version}")
-        base_work = download_source(base)
-    base_installs, _ = analyse(base, base_work) if base_work else ([], {})
+    work, _, base_work = load_sources(recipe, args.base_ref, report)
 
     report.section("cargo install")
-    installs, generated = analyse(recipe, work)
+    installs, generated = analyse(recipe)
     if not installs:
         report.review("no `cargo install` in the linux-64 build script; binaries and Cargo.lock not checked")
     built, certain, msrvs, lock_path = set(), bool(installs), [], None
@@ -182,13 +168,13 @@ def main():
             continue
         man = manifest(work, inst["dir"])
         if man is None or "package" not in man:
-            moved = any(b["dir"] == inst["dir"] and manifest(base_work, b["dir"]) for b in base_installs)
+            moved = base_work is not None and manifest(base_work, inst["dir"]) is not None
             msg = f"no package Cargo.toml at {inst['dir']}"
             (report.fail if moved else report.review)(msg + (" (it existed in the base version)" if moved else ""))
             certain = False
             continue
         ws_dir, ws_man = workspace_root(work, inst["dir"])
-        lock = posixpath.join(ws_dir, "Cargo.lock") if ws_dir != "." else "Cargo.lock"
+        lock = resolve(ws_dir, "Cargo.lock")
         if not work.is_file(lock):
             (report.fail if inst["locked"] else report.review)(f"no Cargo.lock at {lock} (the build uses --locked: {inst['locked']})")
         else:
@@ -202,7 +188,7 @@ def main():
 
         # build.rs compiles and may link native code, so any change matters.
         build_rs = man["package"].get("build", "build.rs")
-        build_rs = posixpath.normpath(posixpath.join(inst["dir"], build_rs)) if isinstance(build_rs, str) else None
+        build_rs = resolve(inst["dir"], build_rs) if isinstance(build_rs, str) else None
         if base_work and build_rs and work.is_file(build_rs):
             if build_rs not in base_work.files:
                 report.review(f"new build script {build_rs}")
@@ -229,13 +215,7 @@ def main():
         base_packages = {}
         if base_work and base_work.is_file(lock_path):
             base_packages = lock_packages(base_work, lock_path)
-            added = sorted(set(packages) - set(base_packages))
-            removed = sorted(set(base_packages) - set(packages))
-            changed = sorted(f"{n} {','.join(sorted(base_packages[n]))} -> {','.join(sorted(packages[n]))}"
-                             for n in set(packages) & set(base_packages) if packages[n] != base_packages[n])
-            print(f"added crates: {added}")
-            print(f"removed crates: {removed}")
-            print(f"changed crates ({len(changed)}): {changed}")
+            print_changes("crates", packages, base_packages)
         elif base_work:
             report.review(f"no {lock_path} in the base version; every crate is compared as new")
         new = set(packages) - set(base_packages)
@@ -268,17 +248,8 @@ def main():
         report.info("Cargo.lock lists crates for every feature and target, so a new crate may not be built at all")
 
     check_licenses(report, recipe, work, base_work, generated)
-    for source in work.uninspected:
-        report.review(f"additional source not inspected: {source}")
-    sys.exit(report.finish())
+    return report.finish(work)
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception:
-        # Exit 2, not 1, so a script that could not run (download failure,
-        # unsupported recipe layout, ...) is never read as a requirements mismatch.
-        traceback.print_exc()
-        print("RESULT: ERROR (the script failed; this is not a requirements mismatch)")
-        sys.exit(2)
+    run(main)

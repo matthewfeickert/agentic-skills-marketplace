@@ -20,11 +20,8 @@ Only v1 recipe.yaml with a single output is supported.
 Exits 0 on a match, 1 on any mismatch, and 2 if the script fails to run.
 """
 
-import argparse
 import posixpath
 import re
-import sys
-import traceback
 from pathlib import Path
 
 from compiled_recipe import (
@@ -33,10 +30,13 @@ from compiled_recipe import (
     check_toolchain,
     commands,
     compare_bins,
-    download_source,
-    join,
     load_recipe,
+    load_sources,
     option,
+    parse_args,
+    print_changes,
+    resolve,
+    run,
     version_tuple,
 )
 
@@ -52,7 +52,7 @@ CGO_MODULES = {
     "github.com/mattn/go-sqlite3", "github.com/libgit2/git2go", "github.com/confluentinc/confluent-kafka-go",
     "github.com/go-gl/glfw", "github.com/miekg/pkcs11",
 }
-IMPORT_C = re.compile(r'^import\s+"C"', re.MULTILINE)
+IMPORT_C = re.compile(rb'^import\s+"C"', re.MULTILINE)
 
 
 def packages(tokens):
@@ -82,11 +82,11 @@ def analyse(recipe):
             pkgs, output = packages(tokens)
             for pkg in pkgs:
                 if pkg.startswith("."):
-                    builds.append({"cmd": tokens[1], "raw": pkg, "dir": join(cwd, pkg.removesuffix("/...")),
+                    builds.append({"cmd": tokens[1], "raw": pkg, "dir": resolve(cwd, pkg.removesuffix("/...")),
                                    "all": pkg.endswith("..."), "output": output if len(pkgs) == 1 else None})
         elif tokens[0] == "go-licenses" and tokens[1:2] == ["save"]:
             outputs = option(tokens, "--save_path")
-            generated[join(cwd, outputs[0]) if outputs else None] = "go-licenses"
+            generated[resolve(cwd, outputs[0]) if outputs else None] = "go-licenses"
     return builds, generated
 
 
@@ -98,32 +98,29 @@ def is_main(work, directory):
 
 
 def parse_gomod(text):
+    """The module path, go and toolchain directives, and {module: version} requirements."""
     mod = {"module": None, "go": None, "toolchain": None, "require": {}}
     block = None
     for raw in text.splitlines():
         line = raw.split("//")[0].strip()
-        indirect = "// indirect" in raw
         if block:
             if line == ")":
                 block = None
             elif block == "require" and line:
                 name, version = line.split()[:2]
-                mod["require"][name] = (version, indirect)
+                mod["require"][name] = version
             continue
         if m := re.match(r"(module|go|toolchain)\s+(\S+)", line):
             mod[m[1]] = m[2].strip('"')
         elif m := re.match(r"(\w+)\s*\($", line):
             block = m[1]
         elif m := re.match(r"require\s+(\S+)\s+(\S+)", line):
-            mod["require"][m[1]] = (m[2], indirect)
+            mod["require"][m[1]] = m[2]
     return mod
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("recipe", nargs="?", default="recipe/recipe.yaml")
-    parser.add_argument("--base-ref", default="origin/main", help="git ref with the base version's recipe")
-    args = parser.parse_args()
+    args = parse_args()
     feedstock_root = Path(args.recipe).resolve().parent.parent
     report = Report()
 
@@ -133,17 +130,7 @@ def main():
         raise RuntimeError("not a Go recipe: no ${{ compiler('go-nocgo') }} or go-cgo in requirements.build")
     cgo = "compiler:go-cgo" in compilers
     print(f"recipe version: {recipe.version} | compiler: {', '.join(sorted(compilers))}")
-    work = download_source(recipe, report)
-
-    base = load_recipe(args.recipe, args.base_ref)
-    base_work = None
-    if base is None:
-        report.info(f"no recipe at {args.base_ref}; nothing to compare against")
-    elif base.version == recipe.version:
-        report.info(f"{args.base_ref} has the same version {base.version} (rebuild); source unchanged")
-    else:
-        print(f"base version ({args.base_ref}): {base.version}")
-        base_work = download_source(base)
+    work, _, base_work = load_sources(recipe, args.base_ref, report)
 
     report.section("go build")
     builds, generated = analyse(recipe)
@@ -178,12 +165,15 @@ def main():
         # Not certain: without -o, Go names a binary after its module or directory.
         compare_bins(report, recipe, {name.removesuffix(".exe") for name in built}, certain=False)
     if not modules:
-        top = f"{work.prefix}/go.mod" if work.prefix else "go.mod"
+        top = resolve(work.prefix, "go.mod")
         if work.is_file(top):
             report.info(f"comparing the top-level {top}")
             modules.add(top)
 
     go_directives = []
+    # Scanned once for all modules: cgo in the modules themselves, or in vendored dependencies.
+    cgo_files = sorted(f for f, content in work.files.items() if content is not None and f.endswith(".go")
+                       and not f.endswith("_test.go") and IMPORT_C.search(content)) if modules else []
     for gomod in sorted(modules):
         report.section(gomod)
         mod = parse_gomod(work.text(gomod))
@@ -198,28 +188,20 @@ def main():
                 report.review(f"module path changed: {old['module']} -> {mod['module']}")
             if old["go"] != mod["go"]:
                 report.info(f"go directive changed: {old['go']} -> {mod['go']}")
-            new_req, old_req = mod["require"], old["require"]
-            print(f"added requirements: {sorted(set(new_req) - set(old_req))}")
-            print(f"removed requirements: {sorted(set(old_req) - set(new_req))}")
-            changed = sorted(f"{n} {old_req[n][0]} -> {new_req[n][0]}"
-                             for n in set(new_req) & set(old_req) if new_req[n][0] != old_req[n][0])
-            print(f"changed requirements ({len(changed)}): {changed}")
-        added = set(mod["require"]) - set(old["require"] if old else {})
-        for name in sorted(added & CGO_MODULES):
-            if not cgo:
+            print_changes("requirements", mod["require"], old["require"])
+        if not cgo:
+            added = set(mod["require"]) - set(old["require"] if old else {})
+            for name in sorted(added & CGO_MODULES):
                 report.review(f"new requirement {name} needs cgo: the recipe uses go-nocgo")
 
-        # cgo in the module itself, or in vendored dependencies.
-        root = posixpath.dirname(gomod)
-        prefix = f"{root}/" if root else ""
-        cgo_files = [f for f in work.files if f.startswith(prefix) and f.endswith(".go")
-                     and not f.endswith("_test.go") and IMPORT_C.search(work.text(f))]
-        vendored = work.is_dir(posixpath.join(root, "vendor")) if root else work.is_dir("vendor")
-        print(f"files with import \"C\": {len(cgo_files)} (vendored dependencies scanned: {vendored})")
-        if cgo_files and not cgo:
-            report.review(f"{len(cgo_files)} files use cgo (e.g. {cgo_files[:3]}) but the recipe uses go-nocgo; "
+        root = posixpath.dirname(gomod) or "."
+        module_cgo = [f for f in cgo_files if root == "." or f.startswith(f"{root}/")]
+        vendored = work.is_dir(resolve(root, "vendor"))
+        print(f"files with import \"C\": {len(module_cgo)} (vendored dependencies scanned: {vendored})")
+        if module_cgo and not cgo:
+            report.review(f"{len(module_cgo)} files use cgo (e.g. {module_cgo[:3]}) but the recipe uses go-nocgo; "
                           "fine if they are behind a cgo build tag with a pure-Go fallback")
-        elif cgo and not cgo_files:
+        elif cgo and not module_cgo:
             report.info("the recipe uses go-cgo, but no scanned file imports \"C\" (a dependency may)")
 
     report.section("go directive")
@@ -227,17 +209,8 @@ def main():
                     "go version", feedstock_root, ["go_compiler_version", "cgo_compiler_version"], "go")
 
     check_licenses(report, recipe, work, base_work, generated)
-    for source in work.uninspected:
-        report.review(f"additional source not inspected: {source}")
-    sys.exit(report.finish())
+    return report.finish(work)
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception:
-        # Exit 2, not 1, so a script that could not run (download failure,
-        # unsupported recipe layout, ...) is never read as a requirements mismatch.
-        traceback.print_exc()
-        print("RESULT: ERROR (the script failed; this is not a requirements mismatch)")
-        sys.exit(2)
+    run(main)
