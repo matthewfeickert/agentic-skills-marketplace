@@ -26,6 +26,7 @@ from packaging.specifiers import Specifier, SpecifierSet
 from packaging.version import Version
 from packaging.utils import canonicalize_name
 
+from compiled_recipe import Recipe
 from download import fetch
 
 # PyPI name -> conda-forge name, where they differ by convention.
@@ -41,6 +42,8 @@ PYPI_TO_CONDA = {
     "tables": "pytables",
     "graphviz": "python-graphviz",
 }
+# The only pip invocation a v1 recipe needs.
+PIP_SCRIPT = "${{ PYTHON }} -m pip install . -vv"
 
 
 def render(value, context):
@@ -135,15 +138,38 @@ def main():
     sha_ok = recipe_sha == sdist["digests"]["sha256"]
     print(f"recipe sha256 matches PyPI: {sha_ok}")
 
-    # source.url must stay version-agnostic. files.pythonhosted.org paths embed
-    # a per-file blake2b hash (packages/ab/cd/<60 hex>/...), so templating the
-    # version into one breaks the next version update.
+    # A PyPI source.url must use the version-agnostic form from conda-forge's
+    # pure-Python example recipe:
+    # https://conda-forge.org/docs/maintainer/example_recipes/pure-python/
+    # The hash-based files.pythonhosted.org/packages/ab/cd/<60 hex>/... paths
+    # embed a per-file blake2b hash, so templating the version into one breaks
+    # the next version update. Non-PyPI sources (e.g. GitHub) are not checked.
     recipe_url = render(str(recipe["source"].get("url", "")), context)
-    hashed_url = bool(re.search(r"files\.pythonhosted\.org/packages/[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f]{60}/", recipe_url))
     print(f"recipe source.url: {recipe_url}")
-    if hashed_url:
-        print("MISMATCH: source.url is a hash-based files.pythonhosted.org path; "
-              f"use https://pypi.org/packages/source/{name[0]}/{name}/<sdist-filename with ${{{{ version }}}}>")
+    is_pypi_url = bool(re.match(r"https?://(pypi\.org|pypi\.io|files\.pythonhosted\.org)/", recipe_url))
+    url_ok = not is_pypi_url or bool(
+        re.fullmatch(r"https://files\.pythonhosted\.org/packages/source/[^/]/[^/]+/[^/]+", recipe_url)
+    )
+    if not url_ok:
+        print("MISMATCH: PyPI source.url is not of the form "
+              f"https://files.pythonhosted.org/packages/source/{name[0]}/{name}/<sdist-filename with ${{{{ version }}}}>")
+
+    # rattler-build and conda-build apply --no-deps and --no-build-isolation to
+    # pip themselves, so recipes use only `${{ PYTHON }} -m pip install . -vv`,
+    # as in the example recipe above.
+    pip_ok = True
+    script = Recipe(open(args.recipe).read(), args.recipe).script_lines()
+    pip_lines = [" ".join(line.split()) for line in script if "pip install" in line]
+    if not pip_lines:
+        print("REVIEW no pip install line found in the build script; check it by hand")
+    for line in pip_lines:
+        print(f"build script: {line}")
+        if "--no-deps" in line or "--no-build-isolation" in line:
+            pip_ok = False
+            print("MISMATCH: rattler-build and conda-build apply --no-deps and --no-build-isolation themselves; "
+                  f"use {PIP_SCRIPT}")
+        elif line != PIP_SCRIPT:
+            print(f"REVIEW build script differs from {PIP_SCRIPT}")
 
     tar = tarfile.open(fileobj=io.BytesIO(fetch(sdist["url"])))
     top_level = {m.name.split("/", 1)[1]: m for m in tar.getmembers() if m.name.count("/") == 1}
@@ -239,7 +265,7 @@ def main():
     python_ok = requires_python is None or python_min is None or requires_python.replace(" ", "") == f">={python_min}"
     if not python_ok:
         print("MISMATCH: Requires-Python does not match python_min")
-    ok = sha_ok and not hashed_url and python_ok and host_ok and not (only_recipe or only_sdist or bounds)
+    ok = sha_ok and url_ok and pip_ok and python_ok and host_ok and not (only_recipe or only_sdist or bounds)
     print("RESULT:", "MATCH" if ok else "MISMATCH")
     sys.exit(0 if ok else 1)
 

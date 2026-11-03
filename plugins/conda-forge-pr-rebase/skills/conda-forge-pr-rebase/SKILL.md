@@ -103,17 +103,22 @@ The PR's build number must be greater than `main`'s. If it isn't, set it to `mai
 
 ### Check `source.url`
 
-The bot's version commit sometimes rewrites `source.url`, e.g. when PyPI's `pypi.org/packages/source/...` redirect was returning 503s at the time. It may replace it with a hash-based `https://files.pythonhosted.org/packages/ab/cd/<60-hex-hash>/<name>-${{ version }}.tar.gz` path. That hash is specific to one file, so the URL breaks on the next version update. Any `source.url` change in the diff above needs a look. If `main`'s URL was the version-agnostic form and the bot replaced it:
+For a source from PyPI, `source.url` must use the version-agnostic form from conda-forge's [pure-Python example recipe](https://conda-forge.org/docs/maintainer/example_recipes/pure-python/): `https://files.pythonhosted.org/packages/source/<l>/<name>/<sdist-filename>`, with `${{ version }}` in the filename (which may use `_` where the package name uses `-`). Any `source.url` change in the diff above needs a look, as do two other forms:
 
-1. Confirm `main`'s URL form serves the same sdist: `curl -sfL https://pypi.org/packages/source/<l>/<name>/<sdist-filename> | sha256sum`. If the redirect returns 503, retry after a short wait; PyPI's redirect service fails intermittently, while `files.pythonhosted.org` stays up.
-2. Restore `main`'s URL in a **separate commit** directly after the bot's version commit, with a body that explains why, e.g. `MNT: Restore PyPI source URL`. Don't edit the bot's commit, so the change stays visible.
+- **Hash-based path:** the bot's version commit sometimes rewrites `source.url` to `https://files.pythonhosted.org/packages/ab/cd/<60-hex-hash>/<name>-${{ version }}.tar.gz`, e.g. when the redirect was returning 503s at the time. That hash is specific to one file, so the URL breaks on the next version update.
+- **Older PyPI hosts:** `https://pypi.org/packages/source/...` or `https://pypi.io/packages/source/...`, often already on `main`.
 
-The validation script in step 3 also flags a hash-based `files.pythonhosted.org` URL as a mismatch.
+If the URL has either form, after the PR's changes or already on `main`:
+
+1. Confirm the `files.pythonhosted.org/packages/source` URL serves the same sdist, with the `curl` command below. If the redirect returns 503, retry after a short wait; it fails intermittently.
+2. Change the URL in a **separate commit** directly after the bot's version commit, with a body that explains why, e.g. `MNT: Use files.pythonhosted.org source URL`. Don't edit the bot's commit, so the change stays visible.
+
+The validation script in step 3 also flags any other PyPI URL form as a mismatch. It doesn't check sources from elsewhere, such as GitHub archives.
 
 Verify the sha256 independently:
 
 ```bash
-curl -sL https://pypi.org/packages/source/<l>/<name>/<sdist-filename> | sha256sum
+curl -sL https://files.pythonhosted.org/packages/source/<l>/<name>/<sdist-filename> | sha256sum
 ```
 
 If the PR's CI failed with a `503 Service Unavailable` while downloading the source, that is a transient PyPI outage, not a recipe problem. Don't change the URL to work around it; report it so the job can be rerun.
@@ -143,7 +148,7 @@ Run the bundled script from the feedstock root:
 pixi exec --force-reinstall -s python -s pyyaml -s packaging -- python "${CLAUDE_SKILL_DIR}"/scripts/compare_requirements.py recipe/recipe.yaml
 ```
 
-It downloads the sdist for the recipe's version and checks that `source.sha256` matches it and that `source.url` is not a hash-based `files.pythonhosted.org` path. It then compares two sets of requirements:
+It downloads the sdist for the recipe's version and checks that `source.sha256` matches it and that a PyPI `source.url` has the `files.pythonhosted.org/packages/source` form (see [Check `source.url`](#check-sourceurl)). It also checks the pip invocation in the build script (see [pip flags](#pip-flags)). It then compares two sets of requirements:
 
 - **Run requirements:** `Requires-Dist` and `Requires-Python` from `PKG-INFO` (not `pyproject.toml`, which can use dynamic metadata) against `requirements.run` and `context.python_min`. Any dependency only in the recipe, only in the sdist, or with different bounds is a mismatch.
 - **Host requirements:** `[build-system].requires` from the sdist's `pyproject.toml` against `requirements.host`. Only a build requirement missing from host is a mismatch. A renamed or replaced build tool shows up here, e.g. upstream `versioneer` vs. recipe `versioneer-518`. **Don't add version bounds to host requirements**, because conda-forge avoids them. Upstream build-tool bounds that the host entries lack (e.g. `setuptools>=61.0`, `hatchling>=1.27,<1.32`) are printed as `info` only, so leave them out. `wheel` is ignored, and host-only entries such as `pip` are informational.
@@ -156,6 +161,10 @@ For anything it reports under `REVIEW`, decide by hand:
 - `if:` blocks in the recipe are not compared.
 - Build requirements with extras: e.g. `versioneer[toml]` needs the extra's own dependencies in host, because the conda package may not pull them in. For `versioneer[toml]` with a host Python below 3.11 that means adding `tomli` to host.
 - No `pyproject.toml` in the sdist: check `setup.py`/`setup.cfg` build requirements by hand.
+
+#### pip flags
+
+The pip invocation in the build script must be only `${{ PYTHON }} -m pip install . -vv` in a v1 `recipe.yaml`, or `{{ PYTHON }} -m pip install . -vv` in a v0 `meta.yaml`, as in the [pure-Python example recipe](https://conda-forge.org/docs/maintainer/example_recipes/pure-python/). Both rattler-build and conda-build now apply `--no-deps` and `--no-build-isolation` to pip themselves, so the script reports either flag as a mismatch. Remove them in a **separate commit** after the bot's commits, e.g. `MNT: Remove redundant pip flags`. Other differences from that line (e.g. `--ignore-installed`, `--no-cache-dir`, or installing a subdirectory) are reported for review: drop flags that only repeat pip defaults or build-tool settings, and keep anything the build needs. The rule applies to any recipe that runs pip, e.g. a Rust package built with maturin, but only `compare_requirements.py` checks it, and only for a v1 `recipe.yaml`. For a v0 `meta.yaml` or another package type, check by hand, e.g. `grep -rn 'pip install' recipe/`, and check a v0 recipe's PyPI `source.url` by hand against [Check `source.url`](#check-sourceurl) too.
 
 ### R packages
 
@@ -214,8 +223,6 @@ The Go script also checks:
 Only v1 `recipe.yaml` recipes with a single output are supported; anything else exits with `RESULT: ERROR`, so compare by hand. Git and local-path sources are not supported either. Additional `url` sources without a `file_name` are not downloaded and are listed for review.
 
 Fix each kind of mismatch in its own commit after the bot's commits (see [step 4](#4-requirements-commit-only-if-needed)): new host libraries, `pkg-config` and vendoring variables in `MNT: Update to v<version> requirements`, and a third-party license bundle missing from `about.license_file` in `MNT: Package third-party licenses`. For a moved package path or a renamed binary, update the build script and tests in a commit that says what moved upstream. Confirm all of these with a local build.
-
-In v1 `recipe.yaml` recipes, a build script of `${{ PYTHON }} -m pip install . -vv` without `--no-deps --no-build-isolation` is correct, because rattler-build enforces those pip settings itself. Don't add the flags.
 
 When a new dependency or raised floor appears, check that conda-forge can satisfy it (`pixi search -c conda-forge <name>`). If it can't, still make the recipe match the metadata, and tell the user that CI will fail until that version is available. Do not act on the dependency's own feedstock.
 
@@ -319,7 +326,8 @@ Tell the user:
 - the commits now on the PR (on top of `main`), and which bot commits were dropped and why
 - how conflicts were resolved, and that the sha256 was verified
 - for rebuild PRs, the PR's and `main`'s build numbers, and whether the build number had to be restored
-- whether the bot changed `source.url`, and whether it was restored
+- whether the bot changed `source.url`, and whether the URL was changed to the `files.pythonhosted.org/packages/source` form
+- for Python recipes, whether redundant pip flags were removed from the build script
 - the validation result for run and host requirements: what mismatched, what the requirements commit changed, and any new floors that conda-forge cannot yet satisfy
 - for Rust and Go packages, the `Cargo.lock`/`go.mod` changes in brief, any new native or cgo dependencies and how they were resolved, the compiler-version check, the license check and any license commit, and the `REVIEW` lines left for the user
 - the local build result, if one was run, and the cause of any CI failure found on the PR
