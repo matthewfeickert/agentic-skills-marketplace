@@ -1,5 +1,5 @@
 ---
-name: conda-forge-pr-rebase
+name: conda-forge-pr-review
 description: Rebase an open conda-forge feedstock PR (typically a regro-cf-autotick-bot version bump) onto the head of the upstream main branch, validate the recipe's run and host requirements against the package metadata (a Python sdist's PKG-INFO and build-system table, an R package's DESCRIPTION, or for Rust and Go packages the Cargo.lock or go.mod, binaries, toolchain version and bundled third-party licenses compared with the previous version's source), add a requirements commit if needed, regenerate with conda-smithy, and force-push to the PR branch. Use when the user asks to rebase a conda-forge feedstock PR or bring a bot version-bump PR up to date with main.
 argument-hint: <conda-forge feedstock PR URL>
 allowed-tools: Bash, Read, Edit, Write
